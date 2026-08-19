@@ -26,6 +26,7 @@
   let saveTimer = 0;
   let dialogContext = null;
   let exchangeResult = null;
+  let moveFeedback = null;
   let ui = Object.assign({
     view: "dashboard",
     scheduleMode: "class",
@@ -122,6 +123,7 @@
   function navigate(view) {
     ui.view = view;
     ui.selectedLesson = "";
+    moveFeedback = null;
     persist(false);
     syncChrome();
     render();
@@ -256,8 +258,17 @@
         <div class="detail-row"><span>주당 시수</span><strong>${requirement?.hours ?? "-"}시간</strong></div>
       </div>
       <div class="status-banner warning" style="margin-bottom:14px"><div class="status-icon">i</div><div><strong>이동 방법</strong><p>선택 상태에서 같은 학급의 빈 칸 또는 다른 수업을 눌러 이동·맞교환합니다.</p></div></div>
+      ${renderMoveFeedback(assignment)}
       <div class="detail-actions"><button class="subtle-button" data-action="toggle-lock" data-id="${assignment.id}">${assignment.locked ? "고정 해제" : "수업 고정"}</button><button class="danger-button" data-action="delete-lesson" data-id="${assignment.id}" ${assignment.locked ? "disabled" : ""}>배정 삭제</button></div>
     </aside>`;
+  }
+
+  function renderMoveFeedback(assignment) {
+    if (!moveFeedback || moveFeedback.assignmentId !== assignment.id) return "";
+    return `<section class="move-feedback"><div class="move-feedback-head"><span>!</span><div><strong>이동할 수 없는 이유</strong><p>${escapeHtml(moveFeedback.reason)}</p></div></div>
+      <div class="move-target">시도 위치 <strong>${escapeHtml(moveFeedback.targetDay)}요일 ${moveFeedback.targetPeriod}교시</strong></div>
+      <div class="condition-list">${moveFeedback.conditions.map((condition) => `<div class="condition-row ${condition.status}"><span class="condition-status">${condition.status === "fail" ? "불충족" : condition.status === "warning" ? "주의" : "충족"}</span><div><strong>${escapeHtml(condition.label)}</strong><small>${escapeHtml(condition.message)}</small></div><span class="condition-value">${escapeHtml(condition.actual)}${condition.limit ? ` / ${escapeHtml(condition.limit)}` : ""}</span></div>`).join("")}</div>
+    </section>`;
   }
 
   function renderConstraints() {
@@ -297,7 +308,7 @@
         <div class="legend"><span><i style="--color:#edf1f6"></i>가능</span><span><i style="--color:var(--green-bg)"></i>선호</span><span><i style="--color:var(--amber-bg)"></i>기피</span><span><i style="--color:#f6dede"></i>불가</span></div>
       </div></div></section>` : `<section class="editor-panel"><div class="empty-state"><strong>등록된 교사가 없습니다</strong>교사를 추가해 조건을 입력하세요.</div></section>`;
 
-    return pageHead("TEACHER CONSTRAINTS", "교사 조건", "교사와 강사의 근무 가능 요일, 수업 불가 교시, 연속수업 한도를 설정합니다.", `<button class="primary-button" data-action="add-teacher">+ 교사 추가</button>`) +
+    return pageHead("TEACHER CONSTRAINTS", "교사 조건", "교사와 강사의 근무 가능 요일, 수업 불가 교시, 연속수업 한도를 설정합니다.", `<button class="subtle-button" data-action="bulk-teacher-template">조건 CSV 내려받기</button><button class="subtle-button" data-action="bulk-teacher-conditions">일괄 입력</button><button class="primary-button" data-action="add-teacher">+ 교사 추가</button>`) +
       `<div class="split-layout"><aside class="master-list"><div class="master-list-head"><input class="search-field" id="teacher-search" value="${escapeHtml(ui.teacherSearch)}" placeholder="교사·과목 검색"></div><div class="master-items">${filtered.map((item) => `<button class="master-item ${item.id === ui.selectedTeacher ? "is-active" : ""}" data-select-teacher="${item.id}"><span class="initial" style="--avatar:${SUBJECT_COLORS[hash(item.name) % SUBJECT_COLORS.length][0]}">${escapeHtml(item.name.slice(-2))}</span><span><strong>${escapeHtml(item.name)} ${item.kind === "강사" ? '<span class="pill warning">강사</span>' : ""}</strong><small>${escapeHtml(item.subjects.join(" · ") || "과목 미등록")}</small></span><span class="count">${assignmentCountForTeacher(item.id)}h</span></button>`).join("") || `<div class="empty-state">검색 결과가 없습니다.</div>`}</div></aside>${editor}</div>`;
   }
 
@@ -362,6 +373,81 @@
     }).filter(Boolean).sort((a, b) => a.score - b.score || a.teacherName.localeCompare(b.teacherName, "ko"));
   }
 
+  function coveragePeriods(state, teacherId, day, temporaryAssignments, omittedIds) {
+    const omitted = new Set(omittedIds || []);
+    const base = state.schedule.filter((item) =>
+      item.teacherId === teacherId && item.day === day && !omitted.has(item.id) &&
+      !(teacherId === ui.absenceTeacher && isAbsenceSlot(item.day, item.period))
+    ).map((item) => item.period);
+    const temporary = temporaryAssignments.filter((item) => item.teacherId === teacherId && item.day === day).map((item) => item.period);
+    return [...base, ...temporary];
+  }
+
+  function coverageLoadValid(state, teacher, temporaryAssignments, omittedIds) {
+    for (const day of state.days) {
+      const periods = coveragePeriods(state, teacher.id, day.id, temporaryAssignments, omittedIds);
+      if (periods.length > teacher.maxDaily || Core.consecutiveMax(periods) > teacher.maxConsecutive) return false;
+    }
+    return true;
+  }
+
+  function reciprocalOptionsFor(state, lesson, temporaryAssignments, usedTargetIds, limit) {
+    const absentTeacher = state.teachers.find((item) => item.id === ui.absenceTeacher);
+    if (!absentTeacher) return [];
+    const used = new Set(usedTargetIds || []);
+    const family = subjectFamily(lesson.subject);
+    const options = [];
+    for (const coverageTeacher of state.teachers) {
+      if (coverageTeacher.id === absentTeacher.id || !coverageTeacher.allowedDays.includes(lesson.day)) continue;
+      if ((coverageTeacher.slotStates[Core.slotKey(lesson.day, lesson.period)] || "available") === "unavailable") continue;
+      if (state.schedule.some((item) => item.teacherId === coverageTeacher.id && item.day === lesson.day && item.period === lesson.period)) continue;
+      if (temporaryAssignments.some((item) => item.teacherId === coverageTeacher.id && item.day === lesson.day && item.period === lesson.period)) continue;
+      const returnLessons = state.schedule.filter((item) =>
+        item.teacherId === coverageTeacher.id && item.type !== "special" && !used.has(item.id) &&
+        !isAbsenceSlot(item.day, item.period) &&
+        !state.schedule.some((other) => other.teacherId === absentTeacher.id && other.day === item.day && other.period === item.period) &&
+        !temporaryAssignments.some((other) => other.teacherId === absentTeacher.id && other.day === item.day && other.period === item.period)
+      );
+      for (const returnLesson of returnLessons) {
+        if (!absentTeacher.allowedDays.includes(returnLesson.day)) continue;
+        if ((absentTeacher.slotStates[Core.slotKey(returnLesson.day, returnLesson.period)] || "available") === "unavailable") continue;
+        const additions = [
+          ...temporaryAssignments,
+          { teacherId: coverageTeacher.id, day: lesson.day, period: lesson.period, coversId: lesson.id },
+          { teacherId: absentTeacher.id, day: returnLesson.day, period: returnLesson.period, coversId: returnLesson.id },
+        ];
+        const omitted = [...used, returnLesson.id];
+        if (!coverageLoadValid(state, coverageTeacher, additions, omitted)) continue;
+        if (!coverageLoadValid(state, absentTeacher, additions, omitted)) continue;
+        const coverExact = coverageTeacher.subjects.some((subject) => subjectFamily(subject) === family);
+        const returnFamily = subjectFamily(returnLesson.subject);
+        const returnExact = absentTeacher.subjects.some((subject) => subjectFamily(subject) === returnFamily);
+        const score = (coverExact ? 4 : 18) + (returnExact ? 4 : 18) + Math.abs(project.days.findIndex((day) => day.id === lesson.day) - project.days.findIndex((day) => day.id === returnLesson.day)) * 2;
+        options.push({
+          type: "reciprocal",
+          lessonId: lesson.id,
+          classId: lesson.classId,
+          className: classById(lesson.classId)?.name || lesson.classId,
+          subject: lesson.subject,
+          fromDay: lesson.day,
+          fromPeriod: lesson.period,
+          coverageTeacherId: coverageTeacher.id,
+          coverageTeacherName: coverageTeacher.name,
+          returnLessonId: returnLesson.id,
+          returnClassId: returnLesson.classId,
+          returnClassName: classById(returnLesson.classId)?.name || returnLesson.classId,
+          returnSubject: returnLesson.subject,
+          returnDay: returnLesson.day,
+          returnPeriod: returnLesson.period,
+          coverExact,
+          returnExact,
+          score,
+        });
+      }
+    }
+    return options.sort((a, b) => a.score - b.score || a.coverageTeacherName.localeCompare(b.coverageTeacherName, "ko")).slice(0, limit || 8);
+  }
+
   function swapOptionsFor(state, lessonId, limit) {
     const lesson = state.schedule.find((item) => item.id === lessonId);
     if (!lesson || lesson.locked || lesson.blockId || lesson.type === "special") return [];
@@ -414,12 +500,13 @@
     const perLesson = affected.map((lesson) => ({
       lesson: Core.clone(lesson),
       swaps: swapOptionsFor(project, lesson.id, 6).map(({ project: ignored, ...item }) => item),
+      reciprocals: reciprocalOptionsFor(project, lesson, [], [], 8),
       substitutes: substituteOptionsFor(project, lesson, []).slice(0, 8),
     }));
     const plans = [];
     let nodes = 0;
 
-    function search(index, state, steps, temporaryAssignments, score) {
+    function search(index, state, steps, temporaryAssignments, usedTargetIds, score) {
       nodes += 1;
       if (nodes > 260 || plans.length >= 16) return;
       if (index >= affected.length) {
@@ -432,7 +519,16 @@
       const swaps = swapOptionsFor(state, lessonId, 4);
       for (const option of swaps) {
         const { project: nextState, ...step } = option;
-        search(index + 1, nextState, [...steps, step], temporaryAssignments, score + Math.max(0, option.score));
+        search(index + 1, nextState, [...steps, step], temporaryAssignments, usedTargetIds, score + Math.max(0, option.score));
+      }
+      const reciprocals = reciprocalOptionsFor(state, currentLesson, temporaryAssignments, usedTargetIds, 4);
+      for (const reciprocal of reciprocals) {
+        const temporary = [
+          ...temporaryAssignments,
+          { teacherId: reciprocal.coverageTeacherId, day: currentLesson.day, period: currentLesson.period, coversId: currentLesson.id },
+          { teacherId: ui.absenceTeacher, day: reciprocal.returnDay, period: reciprocal.returnPeriod, coversId: reciprocal.returnLessonId },
+        ];
+        search(index + 1, state, [...steps, reciprocal], temporary, [...usedTargetIds, reciprocal.returnLessonId], score + reciprocal.score);
       }
       const substitutes = substituteOptionsFor(state, currentLesson, temporaryAssignments).slice(0, 3);
       for (const substitute of substitutes) {
@@ -450,15 +546,15 @@
           score: substitute.score,
         };
         const temporary = [...temporaryAssignments, { teacherId: substitute.teacherId, day: currentLesson.day, period: currentLesson.period }];
-        search(index + 1, state, [...steps, step], temporary, score + (substitute.exact ? 12 : 32) + substitute.dailyLoad);
+        search(index + 1, state, [...steps, step], temporary, usedTargetIds, score + (substitute.exact ? 12 : 32) + substitute.dailyLoad);
       }
     }
 
-    if (affected.length) search(0, project, [], [], 0);
+    if (affected.length) search(0, project, [], [], [], 0);
     const uniquePlans = [];
     const seen = new Set();
     for (const plan of plans.sort((a, b) => a.score - b.score || a.warnings - b.warnings)) {
-      const key = plan.steps.map((step) => step.type === "swap" ? `S:${step.lessonId}:${step.targetId}` : `D:${step.lessonId}:${step.substituteTeacherId}`).join("|");
+      const key = plan.steps.map((step) => step.type === "swap" ? `S:${step.lessonId}:${step.targetId}` : step.type === "reciprocal" ? `R:${step.lessonId}:${step.returnLessonId}` : `D:${step.lessonId}:${step.substituteTeacherId}`).join("|");
       if (!seen.has(key)) { seen.add(key); uniquePlans.push(plan); }
     }
     return {
@@ -478,6 +574,9 @@
     if (step.type === "swap") {
       return `<li><span class="plan-method swap">교환</span><div><strong>${escapeHtml(step.className)} ${escapeHtml(step.subject)}</strong><p>${step.fromDay} ${step.fromPeriod}교시 → ${step.toDay} ${step.toPeriod}교시 · ${escapeHtml(step.exchangeSubject)}(${escapeHtml(step.exchangeTeacherName)})와 맞교환</p></div></li>`;
     }
+    if (step.type === "reciprocal") {
+      return `<li><span class="plan-method reciprocal">상호</span><div><strong>${escapeHtml(step.coverageTeacherName)} 선생님과 상호보강</strong><p>${step.fromDay} ${step.fromPeriod}교시 ${escapeHtml(step.className)}는 ${escapeHtml(step.coverageTeacherName)} 선생님이, ${step.returnDay} ${step.returnPeriod}교시 ${escapeHtml(step.returnClassName)}는 출장 교사가 대신합니다.</p></div></li>`;
+    }
     return `<li><span class="plan-method substitute">대강</span><div><strong>${escapeHtml(step.className)} ${escapeHtml(step.subject)}</strong><p>${step.fromDay} ${step.fromPeriod}교시 · ${escapeHtml(step.substituteTeacherName)} 선생님 ${step.exact ? "동일 교과 대강" : "대강 가능"}</p></div></li>`;
   }
 
@@ -493,35 +592,37 @@
     let resultHtml = `<section class="panel"><div class="empty-state"><strong>출장 또는 교체 조건을 선택하세요</strong>위 조건을 정한 뒤 ‘경우의 수 찾기’를 누르면 원래 시간표를 변경하지 않고 대안을 계산합니다.</div></section>`;
     if (result) {
       const swapCount = result.perLesson.reduce((sum, item) => sum + item.swaps.length, 0);
-      const exactSubstituteCount = result.perLesson.reduce((sum, item) => sum + item.substitutes.filter((candidate) => candidate.exact).length, 0);
+      const reciprocalCount = result.perLesson.reduce((sum, item) => sum + item.reciprocals.length, 0);
       const periodLabel = result.period === "all" ? "하루 전체" : `${result.period}교시`;
       const planCards = result.plans.map((plan, index) => {
         const swaps = plan.steps.filter((step) => step.type === "swap").length;
-        const substitutes = plan.steps.length - swaps;
-        return `<article class="exchange-plan ${index === 0 ? "recommended" : ""}"><div class="exchange-plan-head"><div><span class="eyebrow">대안 ${index + 1}${index === 0 ? " · 추천" : ""}</span><h3>교환 ${swaps}건 · 대강 ${substitutes}건</h3></div><span class="plan-score">부담 ${plan.score}</span></div><ol class="plan-steps">${plan.steps.map(renderPlanStep).join("")}</ol><button class="subtle-button full" data-action="export-exchange-plan" data-plan-index="${index}">이 대안 CSV 저장</button></article>`;
+        const reciprocals = plan.steps.filter((step) => step.type === "reciprocal").length;
+        const substitutes = plan.steps.filter((step) => step.type === "substitute").length;
+        return `<article class="exchange-plan ${index === 0 ? "recommended" : ""}"><div class="exchange-plan-head"><div><span class="eyebrow">대안 ${index + 1}${index === 0 ? " · 추천" : ""}</span><h3>학급교환 ${swaps} · 상호보강 ${reciprocals} · 대강 ${substitutes}</h3></div><span class="plan-score">부담 ${plan.score}</span></div><ol class="plan-steps">${plan.steps.map(renderPlanStep).join("")}</ol><button class="subtle-button full" data-action="export-exchange-plan" data-plan-index="${index}">이 대안 CSV 저장</button></article>`;
       }).join("");
       const lessonCards = result.perLesson.map((item) => {
         const lesson = item.lesson;
         const swaps = item.swaps.map((option) => `<li><strong>${option.toDay} ${option.toPeriod}교시</strong><span>${escapeHtml(option.exchangeSubject)} · ${escapeHtml(option.exchangeTeacherName)}와 맞교환</span></li>`).join("");
+        const reciprocals = item.reciprocals.slice(0, 6).map((option) => `<li><strong>${escapeHtml(option.coverageTeacherName)}</strong><span>${option.returnDay} ${option.returnPeriod}교시 ${escapeHtml(option.returnClassName)} 수업을 출장 교사가 대신</span></li>`).join("");
         const substitutes = item.substitutes.slice(0, 6).map((candidate) => `<li><strong>${escapeHtml(candidate.teacherName)}</strong><span>${candidate.exact ? '<span class="pill success">동일 교과</span>' : '<span class="pill">대강 가능</span>'} 당일 ${candidate.dailyLoad}시간</span></li>`).join("");
-        return `<article class="affected-card"><div class="affected-head"><div><span class="pill error">${lesson.period}교시</span><h3>${escapeHtml(classById(lesson.classId)?.name || lesson.classId)} · ${escapeHtml(lesson.subject)}</h3></div><span>${lesson.locked ? "고정수업" : lesson.blockId ? "연강수업" : "일반수업"}</span></div><div class="candidate-columns"><div><h4>맞교환 후보 ${item.swaps.length}개</h4><ul>${swaps || "<li><span>필수 조건을 만족하는 맞교환 후보가 없습니다.</span></li>"}</ul></div><div><h4>대강 후보 ${item.substitutes.length}명</h4><ul>${substitutes || "<li><span>해당 시간에 가능한 교사가 없습니다.</span></li>"}</ul></div></div></article>`;
+        return `<article class="affected-card"><div class="affected-head"><div><span class="pill error">${lesson.period}교시</span><h3>${escapeHtml(classById(lesson.classId)?.name || lesson.classId)} · ${escapeHtml(lesson.subject)}</h3></div><span>${lesson.locked ? "고정수업" : lesson.blockId ? "연강수업" : "일반수업"}</span></div><div class="candidate-columns three"><div><h4>같은 학급 교환 ${item.swaps.length}개</h4><ul>${swaps || "<li><span>같은 학급 안의 교환 후보가 없습니다.</span></li>"}</ul></div><div><h4>전체 교사 상호보강 ${item.reciprocals.length}개</h4><ul>${reciprocals || "<li><span>전체 시간표에서 가능한 상호보강이 없습니다.</span></li>"}</ul></div><div><h4>단순 대강 ${item.substitutes.length}명</h4><ul>${substitutes || "<li><span>해당 시간에 가능한 교사가 없습니다.</span></li>"}</ul></div></div></article>`;
       }).join("");
       resultHtml = `<div class="status-banner ${result.affected.length ? "" : "warning"}"><div class="status-icon">${result.affected.length ? "✓" : "i"}</div><div><strong>${escapeHtml(result.teacher?.name || "교사")} · ${result.day}요일 ${periodLabel} · ${escapeHtml(result.reason)}</strong><p>${result.affected.length ? `영향 수업 ${result.affected.length}개를 기준으로 원본 시간표를 건드리지 않고 대안을 계산했습니다.` : "선택한 시간에 담당 수업이 없습니다."}</p></div></div>
-        ${result.affected.length ? `<div class="exchange-metrics"><div><span>영향 수업</span><strong>${result.affected.length}</strong></div><div><span>완성된 조합</span><strong>${result.plans.length}</strong></div><div><span>개별 맞교환</span><strong>${swapCount}</strong></div><div><span>동일 교과 대강</span><strong>${exactSubstituteCount}</strong></div></div>
+        ${result.affected.length ? `<div class="exchange-metrics"><div><span>영향 수업</span><strong>${result.affected.length}</strong></div><div><span>완성된 조합</span><strong>${result.plans.length}</strong></div><div><span>같은 학급 교환</span><strong>${swapCount}</strong></div><div><span>전체 교사 상호보강</span><strong>${reciprocalCount}</strong></div></div>
         <div class="section-title" style="margin-top:25px"><div><h3>하루 처리 조합</h3><p>점수가 낮을수록 교환 부담과 대강 부담이 적은 안입니다.</p></div></div>
         <div class="exchange-plan-grid">${planCards || `<div class="empty-state"><strong>전체 수업을 처리하는 조합을 찾지 못했습니다</strong>교사 불가 조건을 조정하거나 개별 후보를 활용하세요.</div>`}</div>
         <div class="section-title" style="margin-top:28px"><div><h3>수업별 후보 상세</h3><p>고정수업과 연강수업은 시간 이동 대신 대강 후보를 우선 제시합니다.</p></div></div>
         <div class="affected-grid">${lessonCards}</div>` : ""}`;
     }
 
-    return pageHead("TEMPORARY EXCHANGE", "수업 교체 도우미", "출장·연가·연수 등 일시적인 결강 상황에서 가능한 맞교환과 대강 조합을 찾습니다.", result?.plans.length ? `<button class="subtle-button" data-action="export-exchange-plan" data-plan-index="0">추천안 CSV</button>` : "") +
+    return pageHead("TEMPORARY EXCHANGE", "수업 교체 도우미", "같은 학급뿐 아니라 전체 교사 시간표에서 상호보강·맞교환·대강 조합을 찾습니다.", result?.plans.length ? `<button class="subtle-button" data-action="export-exchange-plan" data-plan-index="0">추천안 CSV</button>` : "") +
       `<section class="panel absence-panel"><div class="panel-body"><div class="absence-controls">
         <label class="form-group"><span class="form-label">사유</span><select class="form-select" id="absence-reason"><option ${ui.absenceReason === "출장" ? "selected" : ""}>출장</option><option ${ui.absenceReason === "연가" ? "selected" : ""}>연가</option><option ${ui.absenceReason === "연수" ? "selected" : ""}>연수</option><option ${ui.absenceReason === "병가" ? "selected" : ""}>병가</option><option ${ui.absenceReason === "기타" ? "selected" : ""}>기타</option></select></label>
         <label class="form-group"><span class="form-label">대상 교사</span><select class="form-select" id="absence-teacher">${activeTeachers.map((teacher) => `<option value="${teacher.id}" ${teacher.id === ui.absenceTeacher ? "selected" : ""}>${escapeHtml(teacher.name)} · ${escapeHtml(teacher.subjects.join("/"))}</option>`).join("")}</select></label>
         <label class="form-group"><span class="form-label">요일</span><select class="form-select" id="absence-day">${project.days.map((day) => `<option value="${day.id}" ${day.id === ui.absenceDay ? "selected" : ""}>${escapeHtml(day.label)}</option>`).join("")}</select></label>
         <label class="form-group"><span class="form-label">교시 범위</span><select class="form-select" id="absence-period"><option value="all">하루 전체</option>${Array.from({ length: dayInfo?.periods || 0 }, (_, index) => `<option value="${index + 1}" ${String(index + 1) === String(ui.absencePeriod) ? "selected" : ""}>${index + 1}교시만</option>`).join("")}</select></label>
         <button class="primary-button absence-submit" data-action="calculate-exchanges">↔ 경우의 수 찾기</button>
-      </div><p class="form-help" style="margin:12px 0 0">맞교환은 양쪽 교사의 수업 불가 시간·중복·일일 최대·최대 연속수업을 모두 검사합니다. 대강 후보는 해당 시간 공강과 담당 교과를 함께 고려합니다.</p></div></section>
+      </div><p class="form-help" style="margin:12px 0 0">상호보강은 다른 학급을 담당하는 교사가 출장 수업을 대신하고, 출장 교사가 그 교사의 다른 수업을 나중에 대신하는 방식입니다. 양쪽 교사의 불가 시간·중복·일일 최대·연속수업을 모두 검사합니다.</p></div></section>
       <div class="exchange-results">${resultHtml}</div>`;
   }
 
@@ -588,6 +689,85 @@
     syncChrome();
   }
 
+  function slotStateText(teacher, state) {
+    return Object.entries(teacher.slotStates || {}).filter(([, value]) => value === state).map(([key]) => key.replace("-", "")).join("/");
+  }
+
+  function currentTeacherConditionsCsv() {
+    const rows = [["교사명", "구분", "근무가능요일", "불가교시", "선호교시", "기피교시", "일일최대", "연속최대", "희망출근일", "연강선호", "메모"]];
+    for (const teacher of project.teachers) {
+      rows.push([
+        teacher.name,
+        teacher.kind,
+        teacher.allowedDays.join("/"),
+        slotStateText(teacher, "unavailable"),
+        slotStateText(teacher, "prefer"),
+        slotStateText(teacher, "avoid"),
+        teacher.maxDaily,
+        teacher.maxConsecutive,
+        teacher.preferredWorkDays,
+        teacher.preferConsecutive ? "Y" : "N",
+        teacher.notes,
+      ]);
+    }
+    return rowsToCsv(rows);
+  }
+
+  function parseSlotExpression(value) {
+    const keys = [];
+    for (const token of String(value || "").split(/[\/;\s]+/).filter(Boolean)) {
+      const match = token.match(/^([월화수목금])(?:요일)?-?(\d)(?:-(\d))?$/);
+      if (!match) continue;
+      const start = Number(match[2]);
+      const end = Number(match[3] || match[2]);
+      const max = project.days.find((day) => day.id === match[1])?.periods || 0;
+      for (let period = start; period <= Math.min(end, max); period += 1) keys.push(Core.slotKey(match[1], period));
+    }
+    return [...new Set(keys)];
+  }
+
+  function applyBulkTeacherConditions(text) {
+    const rows = parseCsv(String(text || "").replace(/^\ufeff/, ""));
+    const headers = (rows.shift() || []).map((item) => item.trim());
+    const index = Object.fromEntries(headers.map((name, position) => [name, position]));
+    if (index["교사명"] == null) throw new Error("첫 열에 교사명 헤더가 필요합니다.");
+    const next = Core.clone(project);
+    const unknown = [];
+    let updated = 0;
+    const valueAt = (row, name) => index[name] == null ? "" : String(row[index[name]] ?? "").trim();
+    for (const row of rows.filter((entry) => entry.some((cell) => String(cell).trim()))) {
+      const name = valueAt(row, "교사명");
+      const teacher = next.teachers.find((entry) => entry.name === name);
+      if (!teacher) { unknown.push(name || "이름 없음"); continue; }
+      const kind = valueAt(row, "구분");
+      const allowed = valueAt(row, "근무가능요일");
+      const maxDaily = valueAt(row, "일일최대");
+      const maxConsecutive = valueAt(row, "연속최대");
+      const preferredDays = valueAt(row, "희망출근일");
+      const consecutive = valueAt(row, "연강선호");
+      const notes = valueAt(row, "메모");
+      if (kind) teacher.kind = kind;
+      if (allowed) {
+        const days = project.days.map((day) => day.id).filter((day) => allowed.includes(day));
+        if (days.length) teacher.allowedDays = days;
+      }
+      if (maxDaily) teacher.maxDaily = Math.max(1, Math.min(7, Number(maxDaily) || teacher.maxDaily));
+      if (maxConsecutive) teacher.maxConsecutive = Math.max(1, Math.min(7, Number(maxConsecutive) || teacher.maxConsecutive));
+      if (preferredDays) teacher.preferredWorkDays = Math.max(1, Math.min(5, Number(preferredDays) || teacher.preferredWorkDays));
+      if (consecutive) teacher.preferConsecutive = /^(y|yes|예|1|true)$/i.test(consecutive);
+      if (notes) teacher.notes = notes;
+      for (const [column, state] of [["불가교시", "unavailable"], ["선호교시", "prefer"], ["기피교시", "avoid"]]) {
+        if (index[column] == null) continue;
+        const raw = valueAt(row, column);
+        if (!raw) continue;
+        for (const key of Object.keys(teacher.slotStates)) if (teacher.slotStates[key] === state) delete teacher.slotStates[key];
+        if (!/^(-|없음|초기화)$/i.test(raw)) for (const key of parseSlotExpression(raw)) teacher.slotStates[key] = state;
+      }
+      updated += 1;
+    }
+    return { project: next, updated, unknown };
+  }
+
   function openDialog(type, item) {
     dialogContext = { type, item };
     const title = document.getElementById("dialog-title");
@@ -595,11 +775,23 @@
     const body = document.getElementById("dialog-body");
     const submit = document.getElementById("dialog-submit");
     submit.style.display = "inline-flex";
+    submit.textContent = "저장";
     eyebrow.textContent = "DATA INPUT";
 
     if (type === "teacher") {
       title.textContent = "교사 추가";
       body.innerHTML = `<div class="form-grid"><label class="form-group"><span class="form-label">이름</span><input class="form-input" name="name" required autofocus></label><label class="form-group"><span class="form-label">구분</span><select class="form-select" name="kind"><option>교사</option><option>강사</option></select></label><label class="form-group full-row"><span class="form-label">담당 과목</span><input class="form-input" name="subjects" placeholder="예: 수학, 창의수학"></label><label class="form-group"><span class="form-label">목표 시수</span><input class="form-input" name="targetHours" type="number" min="0" value="0"></label><label class="form-group"><span class="form-label">희망 출근일</span><input class="form-input" name="preferredWorkDays" type="number" min="1" max="5" value="5"></label></div>`;
+    } else if (type === "bulk-teachers") {
+      title.textContent = "교사 조건 일괄 입력";
+      submit.textContent = "조건 일괄 적용";
+      body.innerHTML = `<div class="status-banner warning"><div class="status-icon">i</div><div><strong>교사 이름이 같은 행만 업데이트됩니다</strong><p>빈 칸은 기존 값을 유지합니다. 불가·선호·기피 교시는 월1/화3-4처럼 쓰고, 기존 값을 비우려면 - 를 입력하세요.</p></div></div><label class="form-group" style="margin-top:15px"><span class="form-label">CSV 내용</span><textarea class="form-textarea bulk-textarea" name="bulkText" spellcheck="false" required>${escapeHtml(currentTeacherConditionsCsv())}</textarea><span class="form-help">열 순서: 교사명, 구분, 근무가능요일, 불가교시, 선호교시, 기피교시, 일일최대, 연속최대, 희망출근일, 연강선호, 메모</span></label>`;
+    } else if (type === "remove-teacher") {
+      const teacher = item;
+      const requirementCount = project.requirements.filter((entry) => entry.teacherId === teacher.id).length;
+      const lessonCount = project.schedule.filter((entry) => entry.teacherId === teacher.id).length;
+      title.textContent = `${teacher.name} 교사 제거`;
+      submit.textContent = "대체 지정 후 제거";
+      body.innerHTML = `<div class="status-banner warning"><div class="status-icon">!</div><div><strong>연결된 수업을 다른 교사에게 인계합니다</strong><p>수업 시수 ${requirementCount}개와 현재 배정 ${lessonCount}시간의 담당자를 선택한 교사로 변경한 뒤 제거합니다. 변경 후 충돌 검사를 반드시 확인하세요.</p></div></div><label class="form-group" style="margin-top:16px"><span class="form-label">대체 담당 교사</span><select class="form-select" name="replacementTeacherId" required><option value="">선택하세요</option>${project.teachers.filter((entry) => entry.id !== teacher.id).map((entry) => `<option value="${entry.id}">${escapeHtml(entry.name)} · ${escapeHtml(entry.subjects.join("/"))}</option>`).join("")}</select></label>`;
     } else if (type === "class") {
       title.textContent = "학급 추가";
       body.innerHTML = `<div class="form-grid"><label class="form-group"><span class="form-label">학급명</span><input class="form-input" name="name" required autofocus placeholder="예: 1-1"></label><label class="form-group"><span class="form-label">학년</span><input class="form-input" name="grade" type="number" min="1" max="6" value="1"></label><label class="form-group full-row"><span class="form-label">담임교사</span><input class="form-input" name="homeroom" placeholder="교사 이름"></label></div>`;
@@ -630,6 +822,10 @@
     const data = Object.fromEntries(new FormData(dialogForm).entries());
     const next = Core.clone(project);
     if (dialogContext.type === "teacher") {
+      if (next.teachers.some((entry) => entry.name === data.name.trim())) {
+        toast("같은 이름의 교사가 있습니다", "일괄 입력과 수업 연결을 위해 교사 이름은 서로 달라야 합니다.", "error");
+        return;
+      }
       const teacher = {
         id: Core.uid("teacher"), name: data.name.trim(), kind: data.kind, subjects: data.subjects.split(",").map((item) => item.trim()).filter(Boolean),
         targetHours: Number(data.targetHours), maxDaily: 6, maxConsecutive: 3, preferredWorkDays: Number(data.preferredWorkDays),
@@ -637,6 +833,33 @@
       };
       next.teachers.push(teacher);
       ui.selectedTeacher = teacher.id;
+    } else if (dialogContext.type === "bulk-teachers") {
+      try {
+        const result = applyBulkTeacherConditions(data.bulkText);
+        dialog.close();
+        commit(result.project);
+        const skipped = result.unknown.length ? ` · 찾지 못한 이름 ${result.unknown.length}명 (${result.unknown.slice(0, 3).join(", ")}${result.unknown.length > 3 ? " 외" : ""})` : "";
+        toast("교사 조건을 일괄 적용했습니다", `${result.updated}명의 조건을 업데이트했습니다${skipped}.`, result.unknown.length ? "" : "success");
+      } catch (error) {
+        toast("일괄 입력 내용을 확인해 주세요", error.message, "error");
+      }
+      return;
+    } else if (dialogContext.type === "remove-teacher") {
+      const removed = dialogContext.item;
+      const replacement = next.teachers.find((entry) => entry.id === data.replacementTeacherId);
+      if (!removed || !replacement) {
+        toast("대체 교사를 선택해 주세요", "연결된 수업을 인계할 교사가 필요합니다.", "error");
+        return;
+      }
+      next.requirements.forEach((entry) => { if (entry.teacherId === removed.id) entry.teacherId = replacement.id; });
+      next.schedule.forEach((entry) => { if (entry.teacherId === removed.id) entry.teacherId = replacement.id; });
+      next.teachers = next.teachers.filter((entry) => entry.id !== removed.id);
+      ui.selectedTeacher = replacement.id;
+      dialog.close();
+      commit(next);
+      const postValidation = Core.validateProject(next);
+      toast(`${removed.name} 교사를 제거했습니다`, `${replacement.name} 교사에게 수업을 인계했습니다 · 확인할 필수 충돌 ${postValidation.errors.length}건.`, postValidation.errors.length ? "" : "success");
+      return;
     } else if (dialogContext.type === "class") {
       next.classes.push({ id: Core.uid("class"), name: data.name.trim(), grade: Number(data.grade), homeroom: data.homeroom.trim() });
     } else if (dialogContext.type === "requirement") {
@@ -680,34 +903,97 @@
     }, 60);
   }
 
+  function explainMoveAttempt(input, assignmentId, targetDay, targetPeriod, result) {
+    const source = input.schedule.find((item) => item.id === assignmentId);
+    if (!source) return { assignmentId, targetDay, targetPeriod, reason: result.reason, conditions: [] };
+    const target = input.schedule.find((item) => item.classId === source.classId && item.day === targetDay && item.period === Number(targetPeriod));
+    const movedIds = new Set([source.id, target?.id].filter(Boolean));
+    const moves = [{ lesson: source, day: targetDay, period: Number(targetPeriod), role: "이동 수업" }];
+    if (target) moves.push({ lesson: target, day: source.day, period: source.period, role: "맞교환 수업" });
+    const conditions = [];
+    const push = (label, actual, limit, status, message) => conditions.push({ label, actual: String(actual), limit: limit ? String(limit) : "", status, message });
+
+    push("선택 수업 고정", source.locked ? "고정됨" : "해제됨", "고정 해제 필요", source.locked ? "fail" : "pass", source.locked ? "먼저 수업 고정을 해제해야 합니다." : "이동할 수 있는 상태입니다.");
+    if (target) push("대상 수업 고정", target.locked ? "고정됨" : "해제됨", "고정 해제 필요", target.locked ? "fail" : "pass", target.locked ? "대상 수업의 고정을 먼저 해제해야 합니다." : "맞교환할 수 있는 상태입니다.");
+
+    function proposedPeriods(teacherId, day) {
+      const periods = input.schedule.filter((item) => item.teacherId === teacherId && item.day === day && !movedIds.has(item.id)).map((item) => item.period);
+      for (const move of moves) if (move.lesson.teacherId === teacherId && move.day === day) periods.push(move.period);
+      return periods;
+    }
+
+    for (const move of moves) {
+      const teacher = input.teachers.find((item) => item.id === move.lesson.teacherId);
+      if (!teacher) continue;
+      const teacherName = teacher.name;
+      const slotKey = Core.slotKey(move.day, move.period);
+      const allowed = teacher.allowedDays.includes(move.day);
+      push(`${teacherName} 근무 가능 요일`, move.day + "요일", teacher.allowedDays.join("·") + "요일", allowed ? "pass" : "fail", allowed ? `${move.role}의 요일 조건을 충족합니다.` : `${teacherName} 교사는 ${move.day}요일 수업이 불가합니다.`);
+      const slotState = teacher.slotStates[slotKey] || "available";
+      const slotText = { available: "가능", prefer: "선호", avoid: "기피", unavailable: "불가" }[slotState] || slotState;
+      push(`${teacherName} 교시 조건`, `${move.day}${move.period} · ${slotText}`, "불가 제외", slotState === "unavailable" ? "fail" : slotState === "avoid" ? "warning" : "pass", slotState === "unavailable" ? `${teacherName} 교사의 수업 불가 시간입니다.` : slotState === "avoid" ? "배정은 가능하지만 기피 조건입니다." : "배정 가능한 교시입니다.");
+
+      const conflicts = input.schedule.filter((item) => item.teacherId === teacher.id && item.day === move.day && item.period === move.period && !movedIds.has(item.id));
+      push(`${teacherName} 중복 수업`, conflicts.length ? `${conflicts.length}개` : "없음", "0개", conflicts.length ? "fail" : "pass", conflicts.length ? `${teacherName} 교사가 같은 시간에 ${conflicts.length + 1}개 학급에 배정됩니다.` : "다른 학급 수업과 겹치지 않습니다.");
+
+      const periods = proposedPeriods(teacher.id, move.day);
+      const daily = periods.length;
+      push(`${teacherName} 일일 수업`, `${daily}시간`, `최대 ${teacher.maxDaily}시간`, daily > teacher.maxDaily ? "fail" : "pass", daily > teacher.maxDaily ? "일일 최대 수업 수를 넘습니다." : "일일 최대 조건 이내입니다.");
+      const consecutive = Core.consecutiveMax(periods);
+      push(`${teacherName} 연속 수업`, `${consecutive}시간`, `최대 ${teacher.maxConsecutive}시간`, consecutive > teacher.maxConsecutive ? "fail" : "pass", consecutive > teacher.maxConsecutive ? "최대 연속수업 한도를 넘습니다." : "연속수업 한도 이내입니다.");
+
+      if (move.lesson.room) {
+        const roomConflicts = input.schedule.filter((item) => item.room === move.lesson.room && item.day === move.day && item.period === move.period && !movedIds.has(item.id));
+        push(`${move.lesson.room} 사용`, roomConflicts.length ? "중복" : "가능", "중복 없음", roomConflicts.length ? "fail" : "pass", roomConflicts.length ? `${move.lesson.room}이 같은 시간에 이미 사용 중입니다.` : "특별실을 사용할 수 있습니다.");
+      }
+    }
+
+    const knownMessages = new Set(conditions.map((item) => item.message));
+    for (const issue of result.validation?.errors || []) {
+      if (knownMessages.has(issue.message)) continue;
+      const actual = issue.actual != null ? `실제 ${issue.actual}` : "위반";
+      let limit = "필수 조건";
+      if (issue.code === "MAX_DAILY") limit = `최대 ${input.teachers.find((item) => item.id === issue.teacherId)?.maxDaily || "-"}`;
+      if (issue.code === "MAX_CONSECUTIVE") limit = `최대 ${input.teachers.find((item) => item.id === issue.teacherId)?.maxConsecutive || "-"}`;
+      push("추가 필수 조건", actual, limit, "fail", issue.message);
+      knownMessages.add(issue.message);
+    }
+    if (!conditions.some((item) => item.status === "fail")) push("편성 검사 결과", "불가", "필수 조건 충족", "fail", result.reason || "현재 조건에서는 이동할 수 없습니다.");
+    return { assignmentId, targetDay, targetPeriod: Number(targetPeriod), reason: result.reason, conditions };
+  }
+
   function handleScheduleCell(target) {
     const cell = target.closest(".schedule-cell");
     const lessonButton = target.closest("[data-lesson]");
     if (!cell) return;
     if (lessonButton && !ui.selectedLesson) {
       ui.selectedLesson = lessonButton.dataset.lesson;
+      moveFeedback = null;
       render();
       return;
     }
     if (lessonButton && ui.selectedLesson === lessonButton.dataset.lesson) {
       ui.selectedLesson = "";
+      moveFeedback = null;
       render();
       return;
     }
     if (ui.selectedLesson) {
       const result = Core.checkMove(project, ui.selectedLesson, cell.dataset.day, Number(cell.dataset.period), true);
       if (!result.ok) {
+        moveFeedback = explainMoveAttempt(project, ui.selectedLesson, cell.dataset.day, Number(cell.dataset.period), result);
         toast("이동할 수 없습니다", result.reason, "error");
-        if (lessonButton) ui.selectedLesson = lessonButton.dataset.lesson;
         render();
         return;
       }
       ui.selectedLesson = "";
+      moveFeedback = null;
       commit(result.project, result.swapped ? "두 수업을 맞교환했습니다" : "수업을 이동했습니다");
       return;
     }
     if (lessonButton) {
       ui.selectedLesson = lessonButton.dataset.lesson;
+      moveFeedback = null;
       render();
     }
   }
@@ -767,6 +1053,8 @@
     for (const step of plan.steps) {
       if (step.type === "swap") {
         rows.push([exchangeResult.reason, exchangeResult.teacher?.name, step.fromDay, step.fromPeriod, step.className, step.subject, "맞교환", step.exchangeTeacherName, step.toDay, step.toPeriod, `${step.exchangeSubject} 수업과 맞교환`]);
+      } else if (step.type === "reciprocal") {
+        rows.push([exchangeResult.reason, exchangeResult.teacher?.name, step.fromDay, step.fromPeriod, step.className, step.subject, "전체 교사 상호보강", step.coverageTeacherName, step.returnDay, step.returnPeriod, `${step.coverageTeacherName} 교사가 결강 수업을 담당하고 출장 교사는 ${step.returnClassName} ${step.returnSubject} 수업을 대신함`]);
       } else {
         rows.push([exchangeResult.reason, exchangeResult.teacher?.name, step.fromDay, step.fromPeriod, step.className, step.subject, "대강", step.substituteTeacherName, step.fromDay, step.fromPeriod, step.exact ? "동일 교과 대강" : "공강 교사 대강"]);
       }
@@ -894,13 +1182,15 @@
     else if (action === "calculate-exchanges") calculateExchanges();
     else if (action === "print") window.print();
     else if (action === "go-print") { navigate("timetable"); window.setTimeout(() => window.print(), 250); }
-    else if (action === "cancel-selection") { ui.selectedLesson = ""; render(); }
+    else if (action === "cancel-selection") { ui.selectedLesson = ""; moveFeedback = null; render(); }
     else if (action === "toggle-lock") {
       const next = Core.clone(project); const item = next.schedule.find((lesson) => lesson.id === element.dataset.id); if (item) item.locked = !item.locked; commit(next, item?.locked ? "수업을 고정했습니다" : "수업 고정을 해제했습니다");
     } else if (action === "delete-lesson") {
       if (!window.confirm("이 배정을 삭제할까요? 수업 시수는 남아 있어 충돌 검사에서 미배정으로 표시됩니다.")) return;
-      const next = Core.clone(project); next.schedule = next.schedule.filter((item) => item.id !== element.dataset.id); ui.selectedLesson = ""; commit(next, "배정을 삭제했습니다");
+      const next = Core.clone(project); next.schedule = next.schedule.filter((item) => item.id !== element.dataset.id); ui.selectedLesson = ""; moveFeedback = null; commit(next, "배정을 삭제했습니다");
     } else if (action === "add-teacher") openDialog("teacher");
+    else if (action === "bulk-teacher-template") download("교사조건_일괄입력양식.csv", currentTeacherConditionsCsv(), "text/csv;charset=utf-8", true);
+    else if (action === "bulk-teacher-conditions") openDialog("bulk-teachers");
     else if (action === "add-class") openDialog("class");
     else if (action === "add-requirement") {
       if (!project.classes.length || !project.teachers.length) toast("학급과 교사가 필요합니다", "두 항목을 먼저 등록해 주세요.", "error"); else openDialog("requirement");
@@ -910,8 +1200,9 @@
       if (!window.confirm(`${req?.subject || "수업"} 시수와 연결된 배정 ${count}시간을 함께 삭제할까요?`)) return;
       const next = Core.clone(project); next.requirements = next.requirements.filter((item) => item.id !== id); next.schedule = next.schedule.filter((item) => item.requirementId !== id); commit(next, "수업 시수를 삭제했습니다");
     } else if (action === "delete-teacher") {
-      const id = element.dataset.id; const teacher = teacherById(id); const used = project.requirements.filter((item) => item.teacherId === id).length;
-      if (used) { toast("교사를 삭제할 수 없습니다", `연결된 수업 시수 ${used}개를 먼저 다른 교사로 바꾸세요.`, "error"); return; }
+      const id = element.dataset.id; const teacher = teacherById(id); const used = project.requirements.filter((item) => item.teacherId === id).length; const assigned = project.schedule.filter((item) => item.teacherId === id).length;
+      if (project.teachers.length < 2) { toast("마지막 교사는 제거할 수 없습니다", "대체 담당 교사를 먼저 추가해 주세요.", "error"); return; }
+      if (used || assigned) { openDialog("remove-teacher", teacher); return; }
       if (!window.confirm(`${teacher?.name || "교사"} 정보를 삭제할까요?`)) return;
       const next = Core.clone(project); next.teachers = next.teachers.filter((item) => item.id !== id); ui.selectedTeacher = ""; commit(next, "교사를 삭제했습니다");
     } else if (action === "reset-slots") {
@@ -927,7 +1218,7 @@
     else if (action === "load-sample") confirmLoadSample();
     else if (action === "new-project") {
       if (!window.confirm("현재 프로젝트를 모두 비우고 새로 시작할까요? 이 작업은 브라우저에서 되돌릴 수 없습니다.")) return;
-      project = Core.newProject(); validation = Core.validateProject(project); ui.selectedEntity = ""; ui.selectedTeacher = ""; ui.view = "dashboard"; persist(true); render(); toast("새 프로젝트를 시작했습니다", "교사와 학급부터 등록해 주세요.", "success");
+      project = Core.newProject(); validation = Core.validateProject(project); ui.selectedEntity = ""; ui.selectedTeacher = ""; ui.view = "dashboard"; moveFeedback = null; persist(true); render(); toast("새 프로젝트를 시작했습니다", "교사와 학급부터 등록해 주세요.", "success");
     }
   }
 
@@ -937,7 +1228,7 @@
     const action = event.target.closest("[data-action]");
     if (action) { actionHandler(action.dataset.action, action); return; }
     const mode = event.target.closest("[data-schedule-mode]");
-    if (mode) { ui.scheduleMode = mode.dataset.scheduleMode; ui.selectedEntity = ""; ui.selectedLesson = ""; render(); return; }
+    if (mode) { ui.scheduleMode = mode.dataset.scheduleMode; ui.selectedEntity = ""; ui.selectedLesson = ""; moveFeedback = null; render(); return; }
     const teacher = event.target.closest("[data-select-teacher]");
     if (teacher) { ui.selectedTeacher = teacher.dataset.selectTeacher; render(); return; }
     const day = event.target.closest("[data-toggle-day]");
@@ -963,7 +1254,7 @@
   });
 
   root.addEventListener("change", (event) => {
-    if (event.target.id === "entity-select") { ui.selectedEntity = event.target.value; ui.selectedLesson = ""; render(); }
+    if (event.target.id === "entity-select") { ui.selectedEntity = event.target.value; ui.selectedLesson = ""; moveFeedback = null; render(); }
     else if (event.target.id === "requirement-class") { ui.requirementClass = event.target.value; render(); }
     else if (["absence-teacher", "absence-day", "absence-period", "absence-reason"].includes(event.target.id)) {
       const field = { "absence-teacher": "absenceTeacher", "absence-day": "absenceDay", "absence-period": "absencePeriod", "absence-reason": "absenceReason" }[event.target.id];
