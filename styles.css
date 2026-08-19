@@ -370,6 +370,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .absence-submit { min-height: 40px; white-space: nowrap; }
 .exchange-results { display: grid; gap: 18px; }
 .exchange-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; margin-top: 16px; }
+.exchange-metrics.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .exchange-metrics > div { padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 12px; display: flex; align-items: center; justify-content: space-between; background: white; }
 .exchange-metrics span { color: var(--muted); font-size: .71rem; }
 .exchange-metrics strong { font-size: 1.25rem; }
@@ -385,7 +386,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .plan-steps strong { display: block; font-size: .72rem; }
 .plan-steps p { margin: 3px 0 0; color: var(--muted); font-size: .65rem; line-height: 1.45; }
 .plan-method { min-height: 23px; border-radius: 7px; display: grid; place-items: center; font-size: .62rem; font-weight: 800; }
-.plan-method.swap { color: var(--blue-700); background: var(--blue-100); }
 .plan-method.reciprocal { color: #176c56; background: var(--green-bg); }
 .affected-grid { display: grid; gap: 12px; }
 .affected-card { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 14px; background: white; }
@@ -394,6 +394,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .affected-head h3 { margin: 0; font-size: .86rem; }
 .affected-head > span { color: var(--muted); font-size: .67rem; }
 .candidate-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.candidate-columns.single { grid-template-columns: 1fr; }
 .candidate-columns > div { padding: 15px 17px; }
 .candidate-columns > div + div { border-left: 1px solid var(--line-soft); }
 .candidate-columns h4 { margin: 0 0 9px; color: #4a5870; font-size: .72rem; }
