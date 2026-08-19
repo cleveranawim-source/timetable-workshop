@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#12233f">
+  <title>시간표 공방 · 제약 기반 학교 시간표</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div><strong>시간표 공방</strong><small>Constraint Scheduler</small></div>
+      </div>
+      <nav class="nav" aria-label="주요 메뉴">
+        <button class="nav-item is-active" data-view="dashboard"><span class="nav-icon">⌂</span><span>현황판</span></button>
+        <button class="nav-item" data-view="timetable"><span class="nav-icon">▦</span><span>시간표 편집</span></button>
+        <button class="nav-item" data-view="substitution"><span class="nav-icon">↔</span><span>수업 교체</span></button>
+        <button class="nav-item" data-view="constraints"><span class="nav-icon">◇</span><span>교사 조건</span></button>
+        <button class="nav-item" data-view="curriculum"><span class="nav-icon">≡</span><span>수업 시수</span></button>
+        <button class="nav-item" data-view="validation"><span class="nav-icon">✓</span><span>충돌 검사</span><span class="nav-badge" id="nav-issue-badge">0</span></button>
+        <button class="nav-item" data-view="data"><span class="nav-icon">⇄</span><span>데이터 관리</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="save-state"><span class="save-dot"></span><span id="save-label">브라우저에 저장됨</span></div>
+        <button class="subtle-button full" id="help-button">처음 사용 안내</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="mobile-menu" aria-label="메뉴 열기">☰</button>
+        <div class="project-heading">
+          <span class="eyebrow">현재 프로젝트</span>
+          <input id="project-name" class="project-name" value="시간표 프로젝트" aria-label="프로젝트 이름">
+        </div>
+        <div class="topbar-actions">
+          <button class="subtle-button hide-mobile" id="validate-button">충돌 검사</button>
+          <button class="primary-button" id="generate-button"><span>✦</span> 자동 편성</button>
+          <button class="avatar-button" id="more-button" aria-label="빠른 내보내기">내보내기</button>
+        </div>
+      </header>
+
+      <section id="view-root" class="view-root" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <div class="sidebar-scrim" id="sidebar-scrim"></div>
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+
+  <dialog id="app-dialog" class="app-dialog">
+    <form method="dialog" id="dialog-form">
+      <div class="dialog-head">
+        <div><span class="eyebrow" id="dialog-eyebrow">입력</span><h2 id="dialog-title">항목 추가</h2></div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="닫기">×</button>
+      </div>
+      <div class="dialog-body" id="dialog-body"></div>
+      <div class="dialog-actions">
+        <button class="subtle-button" type="button" data-dialog-close>취소</button>
+        <button class="primary-button" id="dialog-submit" value="default">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <input type="file" id="file-input" accept=".json,.csv" hidden>
+  <script src="scheduler-core.js"></script>
+  <script src="sample-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
