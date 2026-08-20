@@ -574,8 +574,9 @@
 
   function renderData() {
     const size = new Blob([JSON.stringify(project)]).size;
-    return pageHead("IMPORT & EXPORT", "데이터 관리", "프로젝트를 백업하거나 다른 컴퓨터로 옮기고, 학급별·교사별 시간표를 CSV로 내보냅니다.", "") +
+    return pageHead("IMPORT & EXPORT", "데이터 관리", "프로젝트를 백업하거나 다른 컴퓨터로 옮기고, 전체 시간표를 한 번에 엑셀로 내보냅니다.", "") +
       `<div class="data-cards">
+        <article class="data-card excel-export-card" style="--tone:#16896b;--tint:#eaf8f4"><div class="data-icon">XL</div><div class="excel-export-copy"><h3>전체 시간표 엑셀</h3><p>첨부 양식처럼 교사별·전체교사·학반별·전체학반 시간표를 한 파일에 만듭니다. 교과교실 배정 시트는 제외됩니다.</p></div><button class="primary-button" data-action="export-xlsx">4개 시트 한 번에 저장</button></article>
         <article class="data-card" style="--tone:#3478ed;--tint:#eaf2ff"><div class="data-icon">↓</div><h3>프로젝트 백업</h3><p>교사 조건, 수업 시수, 현재 배정을 모두 포함하는 JSON 파일입니다. 파일 크기 약 ${Math.ceil(size / 1024)}KB.</p><button class="subtle-button full" data-action="export-json">JSON 내보내기</button></article>
         <article class="data-card" style="--tone:#16896b;--tint:#eaf8f4"><div class="data-icon">↑</div><h3>프로젝트 불러오기</h3><p>이 앱에서 내보낸 JSON 또는 정규화된 시간표 CSV를 불러옵니다. 현재 작업은 자동으로 대체됩니다.</p><button class="subtle-button full" data-action="import-file">JSON·CSV 불러오기</button></article>
         <article class="data-card" style="--tone:#7456d8;--tint:#f2efff"><div class="data-icon">▦</div><h3>학급별 시간표</h3><p>학급·요일·교시·과목·담당교사가 들어 있는 엑셀 호환 UTF-8 CSV를 만듭니다.</p><button class="subtle-button full" data-action="export-class-csv">학급별 CSV</button></article>
@@ -1138,6 +1139,10 @@
       const next = Core.clone(project); const teacher = next.teachers.find((item) => item.id === ui.selectedTeacher); if (teacher) teacher.slotStates = {}; commit(next, "모든 교시를 가능 상태로 바꿨습니다");
     } else if (action === "locate-issue") {
       const item = project.schedule.find((lesson) => lesson.id === element.dataset.id); if (!item) return; ui.scheduleMode = "class"; ui.selectedEntity = item.classId; ui.selectedLesson = item.id; navigate("timetable");
+    } else if (action === "export-xlsx") {
+      if (!window.TimetableXlsxExporter) { toast("엑셀 저장 모듈을 불러오지 못했습니다", "xlsx-export.js 파일이 함께 업로드되었는지 확인해 주세요.", "error"); return; }
+      window.TimetableXlsxExporter.downloadWorkbook(project, `${safeName(project.name)}_전체시간표.xlsx`);
+      toast("전체 시간표 엑셀을 만들었습니다", "교과교실 배정을 제외한 4개 시트가 한 파일에 저장됩니다.", "success");
     } else if (action === "export-json") download(`${safeName(project.name)}.json`, JSON.stringify(project, null, 2), "application/json;charset=utf-8", false);
     else if (action === "export-class-csv") exportClassCsv();
     else if (action === "export-teacher-csv") exportTeacherCsv();
