@@ -28,22 +28,18 @@
   const spaced = name => String(name || "").split("").join(" ");
   const schoolYear = d => (d.getMonth() + 1 >= 3 ? d.getFullYear() : d.getFullYear() - 1);
 
-  /* 교체 1건 → 신고서 2행.
-     같은 반의 두 수업이 교시를 맞바꾸므로 각 교시의 과목도 서로 자리를 바꾼다. */
-  function rowsFor(steps, absentName, baseDate, cls) {
+  /* 회전에 참여한 교시마다 한 행. 왼쪽은 원래 있던 수업, 오른쪽은 바뀐 뒤 들어갈 수업.
+     맞교환(2개)이면 2행, 3개 회전이면 3행이 된다. */
+  function rowsFor(steps, baseDate) {
     const rows = [];
     for (const s of steps) {
-      const d1 = dateForDay(baseDate, s.fromDay);
-      const d2 = dateForDay(baseDate, s.backDay);
-      const name = cls(s.classId);
-      rows.push({
-        left:  [s.subject, monthDay(d1), s.fromDay, String(s.fromPeriod), name, absentName],
-        right: [s.backSubject, monthDay(d1), s.fromDay, String(s.fromPeriod), name, s.coverName],
-      });
-      rows.push({
-        left:  [s.backSubject, monthDay(d2), s.backDay, String(s.backPeriod), name, s.coverName],
-        right: [s.subject, monthDay(d2), s.backDay, String(s.backPeriod), name, absentName],
-      });
+      for (const sl of s.slots) {
+        const d = monthDay(dateForDay(baseDate, sl.day));
+        rows.push({
+          left:  [sl.beforeSubject, d, sl.day, String(sl.period), s.className, sl.beforeTeacher],
+          right: [sl.afterSubject, d, sl.day, String(sl.period), s.className, sl.afterTeacher],
+        });
+      }
     }
     return rows;
   }

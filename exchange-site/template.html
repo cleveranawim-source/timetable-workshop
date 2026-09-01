@@ -239,6 +239,7 @@
   .report-body{padding:18px; overflow:auto; max-height:calc(92vh - 62px); background:var(--surface-2)}
   .report-body iframe{width:100%; height:min(62vh,620px); border:1px solid var(--line-strong); background:#fff; display:block}
   .hint{font-size:12px; color:var(--ink-faint); padding:0 18px 16px; margin:0}
+  .hint a{color:var(--cover); font-weight:600}
 
   .note{margin-top:44px; padding-top:20px; border-top:1px solid var(--line); color:var(--ink-faint); font-size:12.5px; line-height:1.75}
   .note b{color:var(--ink-soft); font-weight:600}
@@ -381,59 +382,98 @@ function loadOk(teacher, temp, omit, sel) {
 }
 
 const stateAt = (teacher, day, period) => teacher.slotStates[day + "-" + period] || "available";
+const CYCLE_MAX = 3;   // 한 회전에 참여하는 수업 수 상한
 
-/* 결강 수업 하나를 두고, 같은 학급 안에서 교시를 맞바꿀 상대 수업을 찾는다.
-   반드시 1대1 교환이다. 한쪽이 일방적으로 떠맡는 보강은 만들지 않는다.
-   두 수업이 자리를 바꾸므로 학급이 받는 과목 수는 그대로다. */
+/* 결강 수업을 같은 반 안에서 다른 교시로 보낸다.
+   반의 모든 교시가 차 있으므로 옮기면 반드시 누군가를 밀어내고, 그 사슬은 결국
+   원래 자리로 돌아온다. 즉 언제나 회전이다. 길이 2면 두 수업의 맞교환이고,
+   3이면 세 수업이 자리를 한 칸씩 돈다. 어느 쪽이든 모든 교사가 자기 과목을
+   그대로 가르치므로 보강이 생기지 않고, 반이 주당 받는 과목 수도 변하지 않는다. */
 function optionsFor(lesson, temp, usedIds, limit, sel) {
+  if (lesson.blockId || lesson.locked || lesson.type === "special") return [];   // 한 시간만 떼어낼 수 없다
   const absent = T.get(sel.teacherId);
-  const out = [];
-  for (const back of byClass.get(lesson.classId) || []) {
-    if (back.id === lesson.id || usedIds.has(back.id)) continue;
-    if (back.type === "special" || back.locked || back.blockId) continue;   // 창체·고정·연강은 쪼갤 수 없다
-    if (!back.teacherId || back.teacherId === absent.id) continue;
-    if (inWindow(back.day, back.period, sel)) continue;                     // 결강 시간대로는 옮길 수 없다
-    const cover = T.get(back.teacherId);
-    if (!cover) continue;
+  const pool = (byClass.get(lesson.classId) || []).filter(x =>
+    x.id !== lesson.id && !usedIds.has(x.id) &&
+    !(x.type === "special" || x.locked || x.blockId) &&   // 창체·고정·연강은 쪼갤 수 없다
+    x.teacherId && x.teacherId !== absent.id &&
+    !inWindow(x.day, x.period, sel));                     // 결강 시간대로는 옮길 수 없다
 
-    // 상대 교사가 결강 교시로 올 수 있는가
-    if (!cover.allowedDays.includes(lesson.day)) continue;
-    if (stateAt(cover, lesson.day, lesson.period) === "unavailable") continue;
-    if (byTeacherSlot.has(cover.id + "|" + lesson.day + "-" + lesson.period)) continue;
-    if (temp.some(t => t.teacherId === cover.id && t.day === lesson.day && t.period === lesson.period)) continue;
+  const weigh = state => state === "avoid" ? 12 : state === "prefer" ? -6 : 0;
+  const found = [];
 
-    // 결강 교사가 상대 교시로 갈 수 있는가
-    if (!absent.allowedDays.includes(back.day)) continue;
-    if (stateAt(absent, back.day, back.period) === "unavailable") continue;
-    if (byTeacherSlot.has(absent.id + "|" + back.day + "-" + back.period)) continue;
-    if (temp.some(t => t.teacherId === absent.id && t.day === back.day && t.period === back.period)) continue;
+  /* item 수업이 (day, period)로 갈 수 있는가. leaving은 이번 회전으로 자리를 비우는 수업들. */
+  function canGo(item, day, period, leaving) {
+    const t = T.get(item.teacherId);
+    if (!t || !t.allowedDays.includes(day)) return false;
+    if (stateAt(t, day, period) === "unavailable") return false;
+    const busy = byTeacherSlot.get(t.id + "|" + day + "-" + period);
+    if (busy && !leaving.has(busy.id)) return false;
+    if (temp.some(x => x.teacherId === t.id && x.day === day && x.period === period)) return false;
+    return true;
+  }
 
-    const add = temp.concat(
-      { teacherId: cover.id, day: lesson.day, period: lesson.period },
-      { teacherId: absent.id, day: back.day, period: back.period }
-    );
-    const omit = new Set(usedIds); omit.add(back.id);
-    if (!loadOk(cover, add, omit, sel)) continue;
-    if (!loadOk(absent, add, omit, sel)) continue;
+  /* 사슬의 마지막 수업을 결강 교시로 되돌려 회전을 닫는다 */
+  function close(chain) {
+    const leaving = new Set(chain.map(x => x.id));
+    if (!canGo(chain[chain.length - 1], lesson.day, lesson.period, leaving)) return;
 
-    const goes = stateAt(absent, back.day, back.period);   // 결강 교사가 가게 될 자리
-    const comes = stateAt(cover, lesson.day, lesson.period); // 상대 교사가 오게 될 자리
-    const weigh = state => state === "avoid" ? 12 : state === "prefer" ? -6 : 0;
-    out.push({
-      lessonId: lesson.id, classId: lesson.classId, subject: lesson.subject,
-      fromDay: lesson.day, fromPeriod: lesson.period,
-      coverId: cover.id, coverName: cover.name,
-      backId: back.id, backClassId: back.classId, backSubject: back.subject,
-      backDay: back.day, backPeriod: back.period,
-      avoided: goes === "avoid" || comes === "avoid",
-      score: Math.abs(DAY_IX.get(lesson.day) - DAY_IX.get(back.day)) * 3
-        + weigh(goes) + weigh(comes) + (back.day === lesson.day ? -2 : 0),
+    const add = temp.slice();
+    for (let i = 0; i < chain.length; i += 1) {
+      const to = chain[(i + 1) % chain.length];
+      add.push({ teacherId: chain[i].teacherId, day: to.day, period: to.period });
+    }
+    const omit = new Set(usedIds);
+    for (const x of chain) omit.add(x.id);
+    for (const id of new Set(chain.map(x => x.teacherId))) {
+      if (!loadOk(T.get(id), add, omit, sel)) return;
+    }
+
+    let score = (chain.length - 2) * 30;   // 짧은 회전을 강하게 우선한다
+    let avoided = false;
+    const slots = chain.map((before, i) => {
+      const after = chain[(i - 1 + chain.length) % chain.length];   // 이 자리로 들어오는 수업
+      const st = stateAt(T.get(after.teacherId), before.day, before.period);
+      if (st === "avoid") avoided = true;
+      score += weigh(st) + Math.abs(DAY_IX.get(before.day) - DAY_IX.get(after.day)) * 3;
+      return {
+        day: before.day, period: before.period,
+        beforeSubject: before.subject, beforeTeacher: T.get(before.teacherId).name,
+        afterSubject: after.subject, afterTeacher: T.get(after.teacherId).name,
+      };
+    });
+
+    found.push({
+      lessonId: lesson.id, classId: lesson.classId, className: cls(lesson.classId),
+      length: chain.length, slots, avoided, score,
+      usedIds: chain.slice(1).map(x => x.id),
+      temp: add.slice(temp.length),
     });
   }
-  out.sort((a, b) => a.score - b.score || a.backPeriod - b.backPeriod || a.coverName.localeCompare(b.coverName, "ko"));
-  return out.slice(0, limit);
-}
 
+  function extend(chain) {
+    if (chain.length >= 2) close(chain);
+    if (chain.length >= CYCLE_MAX) return;
+    const prev = chain[chain.length - 1];
+    const leaving = new Set(chain.map(x => x.id));
+    for (const cand of pool) {
+      if (chain.some(x => x.id === cand.id)) continue;
+      const next = new Set(leaving); next.add(cand.id);
+      if (!canGo(prev, cand.day, cand.period, next)) continue;   // prev가 cand의 자리로 간다
+      extend(chain.concat(cand));
+    }
+  }
+  extend([lesson]);
+
+  found.sort((a, b) => a.score - b.score || a.length - b.length);
+  const seen = new Set(), unique = [];
+  for (const o of found) {
+    const key = o.slots.map(s => s.day + s.period).sort().join(",");
+    if (seen.has(key)) continue;                                 // 같은 자리 집합은 한 번만
+    seen.add(key); unique.push(o);
+    if (unique.length >= limit) break;
+  }
+  return unique;
+}
 const NODE_CAP = 4000, PLAN_CAP = 60, SHOW = 12;
 
 function solve(sel) {
@@ -454,11 +494,9 @@ function solve(sel) {
     }
     const lesson = affected[i];
     for (const o of optionsFor(lesson, temp, used, 6, sel)) {
-      const nextUsed = new Set(used); nextUsed.add(o.backId);
-      walk(i + 1, steps.concat(o),
-        temp.concat({ teacherId: o.coverId, day: lesson.day, period: lesson.period },
-                    { teacherId: sel.teacherId, day: o.backDay, period: o.backPeriod }),
-        nextUsed, score + o.score, missed);
+      const nextUsed = new Set(used);
+      for (const id of o.usedIds) nextUsed.add(id);
+      walk(i + 1, steps.concat(o), temp.concat(o.temp), nextUsed, score + o.score, missed);
     }
     // 이 수업은 짝을 못 찾은 채로 두고 나머지를 계속 — 부분 조합
     walk(i + 1, steps, temp, used, score, missed.concat(lesson));
@@ -468,7 +506,7 @@ function solve(sel) {
   const seen = new Set(), unique = [];
   plans.sort((a, b) => a.missed.length - b.missed.length || a.score - b.score);
   for (const p of plans) {
-    const key = p.steps.map(s => s.lessonId + ">" + s.backId).join("|");
+    const key = p.steps.map(s => s.lessonId + ">" + s.slots.map(x => x.day + x.period).join("+")).join("|");
     if (seen.has(key)) continue;
     seen.add(key); unique.push(p);
     if (unique.length >= SHOW) break;
@@ -487,8 +525,7 @@ function weekMap(plan, r) {
   const mark = new Map();
   for (const l of byTeacher.get(r.sel.teacherId) || []) mark.set(l.day + "-" + l.period, { k: "busy" });
   plan.steps.forEach((s, i) => {
-    mark.set(s.fromDay + "-" + s.fromPeriod, { k: "from", n: i + 1 });
-    mark.set(s.backDay + "-" + s.backPeriod, { k: "to", n: i + 1 });
+    s.slots.forEach((sl, j) => mark.set(sl.day + "-" + sl.period, { k: j === 0 ? "from" : "to", n: i + 1 }));
   });
   for (const l of plan.missed) mark.set(l.day + "-" + l.period, { k: "miss" });
 
@@ -505,15 +542,18 @@ function weekMap(plan, r) {
   return '<div class="week" role="img" aria-label="주간 시간표에서 교체가 일어나는 위치">' + html + "</div>";
 }
 
+const missReason = l => l.blockId ? "2시간 연강이라 한 시간만 옮길 수 없음"
+  : l.locked || l.type === "special" ? "고정수업이라 옮길 수 없음"
+  : "같은 반 안에 옮길 자리가 없음";
+
 function planText(plan, r) {
   const head = r.absent.name + " 선생님 " + r.sel.day + "요일 " + periodLabel(r.sel.period) + " " + r.sel.reason + " · 수업 교체안";
-  const rows = plan.steps.map((s, i) =>
-    (i + 1) + ". " + cls(s.classId) + " — " +
-    s.fromDay + " " + s.fromPeriod + "교시 " + s.subject + " ↔ " +
-    s.backDay + " " + s.backPeriod + "교시 " + s.backSubject + "\n" +
-    "   " + s.fromDay + " " + s.fromPeriod + "교시는 " + s.coverName + " 선생님이 " + s.backSubject + " 수업,\n" +
-    "   " + s.backDay + " " + s.backPeriod + "교시는 " + r.absent.name + " 선생님이 " + s.subject + " 수업");
-  const miss = plan.missed.map(l => "· " + l.day + " " + l.period + "교시 " + cls(l.classId) + " " + l.subject + " — 교체 상대를 찾지 못함");
+  const rows = plan.steps.map((s, i) => [
+    (i + 1) + ". " + s.className + " — " + (s.length === 2 ? "두 수업 맞교환" : s.length + "개 수업 자리 이동"),
+    ...s.slots.map(sl => "   " + sl.day + " " + sl.period + "교시: " +
+      sl.beforeSubject + "(" + sl.beforeTeacher + ") → " + sl.afterSubject + "(" + sl.afterTeacher + ")"),
+  ].join("\n"));
+  const miss = plan.missed.map(l => "· " + l.day + " " + l.period + "교시 " + cls(l.classId) + " " + l.subject + " — " + missReason(l));
   return [head, "", ...rows, ...(miss.length ? ["", "[미해결]", ...miss] : [])].join("\n");
 }
 
@@ -521,19 +561,19 @@ function planCard(plan, i, r) {
   const done = plan.steps.length, miss = plan.missed.length;
   const steps = plan.steps.map((s, n) => `
     <li><span class="idx">${n + 1}</span><div class="swap">
-      <b>${esc(cls(s.classId))}</b> <span class="slot">${s.fromDay} ${s.fromPeriod}교시</span> ${esc(s.subject)}
-      ↔ <span class="slot">${s.backDay} ${s.backPeriod}교시</span> ${esc(s.backSubject)}
-      <span class="sub"><span class="slot">${s.fromDay} ${s.fromPeriod}</span>은 <span class="to-t">${esc(s.coverName)}</span> 선생님이 ${esc(s.backSubject)},
-      <span class="slot">${s.backDay} ${s.backPeriod}</span>은 <span class="from-t">${esc(r.absent.name)}</span> 선생님이 ${esc(s.subject)}</span>
+      <b>${esc(s.className)}</b> ${s.length === 2 ? "두 수업 맞교환" : s.length + "개 수업 자리 이동"}
+      ${s.slots.map(sl => `<span class="sub"><span class="slot">${sl.day} ${sl.period}교시</span>
+        ${esc(sl.beforeSubject)} · ${esc(sl.beforeTeacher)} →
+        <b>${esc(sl.afterSubject)}</b> · <span class="to-t">${esc(sl.afterTeacher)}</span></span>`).join("")}
     </div></li>`).join("");
   const missed = plan.missed.map(l => `
     <li><span class="idx gap">—</span><div class="swap">
       <span class="slot">${l.day} ${l.period}교시</span> <b>${esc(cls(l.classId))} ${esc(l.subject)}</b>
-      <span class="sub">같은 반 안에서 맞바꿀 수업을 찾지 못했습니다. 이 시간만 따로 조정하세요.</span>
+      <span class="sub">${esc(missReason(l))}. 이 시간만 따로 조정하세요.</span>
     </div></li>`).join("");
   return `<article class="plan ${i === 0 ? "best" : ""}">
     <div class="plan-top">
-      <div><h3>대안 ${i + 1}${i === 0 ? " · 추천" : ""}</h3><div class="load">부담 ${plan.score} · 교체 ${done}건</div></div>
+      <div><h3>대안 ${i + 1}${i === 0 ? " · 추천" : ""}</h3><div class="load">부담 ${plan.score} · 교체 ${done}건 · 수업 ${plan.steps.reduce((n, s) => n + s.length, 0)}개 이동</div></div>
       <span class="chip ${miss ? "part" : "full"}">${miss ? `${done}/${done + miss} 해결` : "전부 해결"}</span>
     </div>
     ${weekMap(plan, r)}
@@ -552,8 +592,8 @@ function render(r) {
   const cand = r.perLesson.reduce((n, x) => n + x.options.length, 0);
   const lessons = r.perLesson.map(x => {
     const list = x.options.length
-      ? x.options.map(o => `<li><b>${o.backDay} ${o.backPeriod}교시</b><span>${esc(o.backSubject)} · ${esc(o.coverName)} 선생님과 교시 맞바꿈${o.avoided ? " · 기피 교시 포함" : ""}</span></li>`).join("")
-      : `<li><span>같은 반 안에 맞바꿀 수 있는 수업이 없습니다.</span></li>`;
+      ? x.options.map(o => `<li><b>${o.length === 2 ? "맞교환" : o.length + "개 회전"}</b><span>${o.slots.slice(1).map(sl => sl.day + " " + sl.period + "교시 " + esc(sl.beforeSubject) + "(" + esc(sl.beforeTeacher) + ")").join(", ")}와 자리 이동${o.avoided ? " · 기피 교시 포함" : ""}</span></li>`).join("")
+      : `<li><span>같은 반 안에 옮길 수 있는 자리가 없습니다.</span></li>`;
     return `<details class="lesson"${x.options.length ? "" : " open"}>
       <summary><span class="per">${x.lesson.period}교시</span>
         <b>${esc(cls(x.lesson.classId))} · ${esc(x.lesson.subject)}</b>
@@ -647,26 +687,22 @@ $("out").innerHTML = `<div class="empty"><strong>조건을 정하고 ‘경우�
    교체 1건이 2행(원래 수업 / 교체 수업)이 되고,
    같은 학급끼리 맞바꾸면 과목이 서로 자리를 바꾼다. */
 
+/* Artifact 뷰어는 .hwpx 내려받기를 허용하지 않는다. 다른 확장자로 바꿔 내주지 않고,
+   한글 파일이 필요하면 같은 도구가 올라가 있는 사이트로 보낸다. */
 const IN_ARTIFACT = typeof window.claude === "object" && window.claude !== null && typeof window.claude.use === "function";
-let DOWNLOADS = null;
-if (IN_ARTIFACT) {
-  window.claude.use("downloads").then(d => { DOWNLOADS = d; }).catch(() => { DOWNLOADS = null; });
-}
+const SITE_URL = "https://cleveranawim-source.github.io/timetable-workshop/exchange-site/";
 
 function reportRows(plan, r, base) {
   const rows = [];
+  const md = d => (d.getMonth() + 1) + "." + d.getDate();
   for (const s of plan.steps) {
-    const d1 = nextDateFor(s.fromDay, base), d2 = nextDateFor(s.backDay, base);
-    const md = d => (d.getMonth() + 1) + "." + d.getDate();
-    const name = cls(s.classId);
-    rows.push({
-      left: [s.subject, md(d1), s.fromDay, s.fromPeriod, name, r.absent.name],
-      right: [s.backSubject, md(d1), s.fromDay, s.fromPeriod, name, s.coverName],
-    });
-    rows.push({
-      left: [s.backSubject, md(d2), s.backDay, s.backPeriod, name, s.coverName],
-      right: [s.subject, md(d2), s.backDay, s.backPeriod, name, r.absent.name],
-    });
+    for (const sl of s.slots) {
+      const d = md(nextDateFor(sl.day, base));
+      rows.push({
+        left: [sl.beforeSubject, d, sl.day, sl.period, s.className, sl.beforeTeacher],
+        right: [sl.afterSubject, d, sl.day, sl.period, s.className, sl.afterTeacher],
+      });
+    }
   }
   return rows;
 }
@@ -799,7 +835,7 @@ async function buildHwpx(plan, r) {
 
   const base = $("date").value ? fromValue($("date").value) : nextDateFor(r.sel.day);
   const data = {
-    rows: HwpxFill.rowsFor(plan.steps, r.absent.name, base, cls),
+    rows: HwpxFill.rowsFor(plan.steps, base),
     reason: r.sel.reason,
     teacherName: r.absent.name,
     schoolYear: HwpxFill.schoolYear(base),
@@ -820,11 +856,11 @@ function openReport(plan, r) {
   $("report-title").textContent = `${r.absent.name} 선생님 · ${dateLabel} ${r.sel.reason} · 교체 수업 신고서`;
   $("report-frame").srcdoc = reportState.html;
   const save = $("report-save");
-  save.textContent = IN_ARTIFACT ? "HTML로 저장" : "한글 파일(.hwpx)로 저장";
-  save.hidden = IN_ARTIFACT && !DOWNLOADS;
-  $("report-hint").textContent = IN_ARTIFACT
-    ? "Artifact에서는 한글 파일을 직접 내려받을 수 없어 HTML로 저장합니다. 저장한 파일은 한글에서 열어 편집할 수 있고, 인쇄해서 서명받아도 됩니다."
-    : "‘한글 파일(.hwpx)’은 첨부해 주신 양식을 그대로 채운 파일입니다. 한글에서 열어 확인 후 결재 올리세요.";
+  save.hidden = IN_ARTIFACT;
+  save.textContent = "한글 파일(.hwpx)로 저장";
+  $("report-hint").innerHTML = IN_ARTIFACT
+    ? '이 화면에서는 한글 파일을 내려받을 수 없습니다. <a href="' + SITE_URL + '" target="_blank" rel="noopener">수업 교체 도우미 사이트</a>에서 같은 조건으로 조회하면 .hwpx로 바로 받을 수 있습니다.'
+    : "첨부 양식을 그대로 채운 한글 파일입니다. 열어서 확인한 뒤 결재 올리세요.";
   $("report").showModal();
 }
 $("report-close").addEventListener("click", () => $("report").close());
@@ -842,22 +878,16 @@ $("report-save").addEventListener("click", async () => {
   const label = btn.textContent;
   btn.disabled = true; btn.textContent = "저장 중…";
   try {
-    if (IN_ARTIFACT) {
-      if (!DOWNLOADS) throw new Error("이 화면에서는 파일 저장을 쓸 수 없습니다.");
-      await DOWNLOADS.save({ filename: stem + ".html", data: reportState.html });
-      btn.textContent = "저장했습니다";
-    } else {
-      const bytes = await buildHwpx(plan, r);
-      const url = URL.createObjectURL(new Blob([bytes], { type: "application/hwp+zip" }));
-      const a = document.createElement("a");
-      a.href = url; a.download = stem + ".hwpx";
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-      btn.textContent = "저장했습니다";
-    }
+    const bytes = await buildHwpx(plan, r);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/hwp+zip" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = stem + ".hwpx";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    btn.textContent = "저장했습니다";
     setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 1800);
   } catch (e) {
-    btn.textContent = e && e.code === "declined" ? "저장을 취소했습니다" : "저장하지 못했습니다";
+    btn.textContent = "저장하지 못했습니다";
     setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2200);
   }
 });
