@@ -22,7 +22,7 @@ function slimData() {
       allowedDays: t.allowedDays, slotStates: t.slotStates,
       maxDaily: t.maxDaily, maxConsecutive: t.maxConsecutive,
     })),
-    classes: p.classes.map(c => ({ id: c.id, name: c.name })),
+    classes: p.classes.map(c => ({ id: c.id, name: c.name, grade: c.grade, homeroom: c.homeroom })),
     schedule: p.schedule.map(a => ({
       id: a.id, classId: a.classId, teacherId: a.teacherId, subject: a.subject,
       day: a.day, period: a.period,

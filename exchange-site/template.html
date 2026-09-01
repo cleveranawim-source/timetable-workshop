@@ -155,7 +155,8 @@
     background:var(--warn-fill); border-radius:2px;
   }
   .advise strong{display:block; font-size:13px; color:var(--warn); margin-bottom:3px}
-  .advise p{margin:0; font-size:12.5px; line-height:1.6; color:var(--ink-soft)}
+  .advise p{margin:0; font-size:12.5px; line-height:1.65; color:var(--ink-soft)}
+  .advise b{color:var(--ink); font-weight:600}
   .plan-foot{margin-top:auto; padding:14px 16px; display:flex; gap:8px}
   .ghost{
     font:inherit; font-size:12.5px; font-weight:500; color:var(--ink-soft);
@@ -323,6 +324,11 @@
     창체·고정수업과 2시간 연강은 쪼갤 수 없어 상대 후보에서 뺍니다.<br>
     <b>검사 항목</b> — 양쪽 교사의 같은 시간 수업 중복, 수업 불가 교시, 근무 가능 요일, 일일 최대 수업, 최대 연속수업을 가상 시간표에서 다시 검사합니다.<br>
     <b>부담 점수</b> — 낮을수록 좋습니다. 두 수업의 요일이 가까울수록, 두 교사의 기피 교시를 건드리지 않을수록 낮아집니다.<br>
+    <b>부담 표시</b> — 교체 전후를 비교해 연속 3시간 이상이 새로 생기거나 하루 수업이 늘어 한도에 닿으면 적어 둡니다.
+    그중 <b>연속 4시간, 하루 6시간을 넘거나 하루 한도가 5시간 이상인 분이 한도까지 차는 경우</b>를 무리한 교체로 보고 보강을 권합니다.<br>
+    <b>보강 후보</b> — 그 교시에 수업이 없고 일일·연속 한도에 걸리지 않는 선생님입니다. 담당 과목이나 총 시수는 따지지 않아
+    시수가 많아도 그 시간에 비어 있으면 후보가 됩니다. <b>같은 반, 그 다음 같은 학년</b>에 들어가는 선생님을 앞에 둡니다.
+    부장교사와 신고 당사자는 제외합니다.<br>
     <b>주의</b> — 결과는 임시 계획입니다. 정규 시간표는 바뀌지 않으며, 실제 적용 전 양쪽 선생님의 동의를 받으세요.
   </p>
 </div>
@@ -418,27 +424,68 @@ function strainOf(chain, temp, usedIds, add, omit, sel) {
       teacher: t.name, day, runUp, loadUp,
       run: afterRun, maxRun: t.maxConsecutive,
       count: after.length, maxCount: t.maxDaily,
-      hard: (runUp && loadUp) || afterRun >= 4 || after.length >= 6,
+      hard: afterRun >= 4 || after.length >= 6 || (loadUp && after.length >= t.maxDaily && t.maxDaily >= 5),
     });
   }
   return notes;
 }
 
-/* 그 교시에 수업이 없는 교사 — 보강을 부탁할 수 있는 사람들 */
-function freeTeachersAt(day, period, sel) {
+/* 보강을 부탁하지 않는 사람 — 부장교사와 신고 당사자.
+   부장 명단은 시간표 자료에 없으므로 여기에 이름을 적어 관리한다. */
+const NO_COVER = ["이승열"];
+
+/* 어느 교사가 어느 학년·학급에 들어가는지 — 같은 학년 선생님을 먼저 권하기 위해 */
+const teacherGrades = new Map(), teacherClasses = new Map();
+for (const l of DATA.schedule) {
+  if (!l.teacherId) continue;
+  if (!teacherGrades.has(l.teacherId)) teacherGrades.set(l.teacherId, new Set());
+  if (!teacherClasses.has(l.teacherId)) teacherClasses.set(l.teacherId, new Set());
+  const g = C.get(l.classId) && C.get(l.classId).grade;
+  if (g) teacherGrades.get(l.teacherId).add(g);
+  teacherClasses.get(l.teacherId).add(l.classId);
+}
+
+/* 그 교시에 수업이 없는 교사 — 보강을 부탁할 수 있는 사람들.
+   담당 과목이나 총 시수는 따지지 않는다. 시수가 많아도 그 시간에 비어 있으면 후보다.
+   같은 반, 그 다음 같은 학년에 들어가는 선생님을 앞세운다. */
+function freeTeachersAt(day, period, sel, classId) {
+  const grade = classId && C.get(classId) && C.get(classId).grade;
   const out = [];
   for (const t of DATA.teachers) {
     if (t.id === sel.teacherId || !byTeacher.has(t.id)) continue;
+    if (NO_COVER.includes(t.name)) continue;
     if (!t.allowedDays.includes(day)) continue;
     if (stateAt(t, day, period) === "unavailable") continue;
     if (byTeacherSlot.has(t.id + "|" + day + "-" + period)) continue;
     const after = (byTeacherDay.get(t.id + "|" + day) || []).map(l => l.period).concat(period);
     if (after.length > t.maxDaily || consecutiveMax(after) > t.maxConsecutive) continue;
-    out.push({ name: t.name, subjects: t.subjects.join("/"), load: after.length, max: t.maxDaily,
-               run: consecutiveMax(after), prefers: stateAt(t, day, period) === "prefer" });
+    out.push({
+      name: t.name, subjects: t.subjects.join("/"),
+      sameClass: Boolean(classId && teacherClasses.get(t.id) && teacherClasses.get(t.id).has(classId)),
+      sameGrade: Boolean(grade && teacherGrades.get(t.id) && teacherGrades.get(t.id).has(grade)),
+      grade, load: after.length, max: t.maxDaily,
+      run: consecutiveMax(after), prefers: stateAt(t, day, period) === "prefer",
+    });
   }
-  out.sort((a, b) => (b.prefers - a.prefers) || (a.run - b.run) || (a.load - b.load) || a.name.localeCompare(b.name, "ko"));
+  out.sort((a, b) =>
+    (b.sameClass - a.sameClass) || (b.sameGrade - a.sameGrade) ||
+    (b.prefers - a.prefers) || (a.run - b.run) || (a.load - b.load) ||
+    a.name.localeCompare(b.name, "ko"));
   return out;
+}
+
+/* 보강 후보 한 명을 사람이 읽는 문구로 */
+function coverLabel(f) {
+  const tag = f.sameClass ? "이 반 담당" : f.sameGrade ? f.grade + "학년 담당" : "";
+  const inner = [f.subjects, tag].filter(Boolean).join(", ");
+  return esc(f.name) + (inner ? "(" + esc(inner) + ")" : "");
+}
+
+/* 무리로 본 실제 사유. 연속 3시간은 표시만 하고 사유가 되지 않는다. */
+function hardReason(n) {
+  if (n.run >= 4) return n.teacher + " 선생님 " + n.day + "요일 연속 " + n.run + "시간";
+  if (n.count >= 6) return n.teacher + " 선생님 " + n.day + "요일 하루 " + n.count + "시간";
+  return n.teacher + " 선생님 " + n.day + "요일 하루가 " + n.count + "시간(한도 " + n.maxCount + ")으로 꽉 참";
 }
 
 const CYCLE_MAX = 3;   // 한 회전에 참여하는 수업 수 상한
@@ -619,12 +666,19 @@ function planText(plan, r) {
     "· " + n.teacher + " 선생님 " + n.day + "요일 " +
     [n.runUp ? "연속 " + n.run + "시간" : "", n.loadUp ? "하루 " + n.count + "시간(한도 " + n.maxCount + ")" : ""].filter(Boolean).join(" · ")));
   const miss = plan.missed.map(l => {
-    const free = freeTeachersAt(l.day, l.period, r.sel).slice(0, 4).map(f => f.name).join(", ");
+    const free = freeTeachersAt(l.day, l.period, r.sel, l.classId).slice(0, 4)
+      .map(f => f.name + (f.sameClass ? "(이 반 담당)" : f.sameGrade ? "(" + f.grade + "학년)" : "")).join(", ");
     return "· " + l.day + " " + l.period + "교시 " + cls(l.classId) + " " + l.subject + " — " + missReason(l) +
       (free ? " (이 시간 공강: " + free + ")" : "");
   });
-  const advise = plan.steps.some(s => s.hard)
-    ? ["", "[권고] 선생님 부담이 한도까지 찹니다. 공강 교사에게 보강을 부탁하는 편이 나을 수 있습니다."] : [];
+  const hardNotes = plan.steps.flatMap(s => s.strain || []).filter(n => n.hard);
+  const advise = hardNotes.length
+    ? ["", "[권고] " + hardNotes.map(hardReason).join(". ") + ".",
+       "아래 공강 교사에게 보강을 부탁하는 편이 나을 수 있습니다.",
+       ...freeTeachersAt(r.affected[0].day, r.affected[0].period, r.sel, r.affected[0].classId)
+         .filter(f => !hardNotes.some(n => n.teacher === f.name)).slice(0, 5)
+         .map(f => "· " + f.name + "(" + [f.subjects, f.sameClass ? "이 반 담당" : f.sameGrade ? f.grade + "학년 담당" : ""].filter(Boolean).join(", ") + ")")]
+    : [];
   return [head, "", ...rows,
     ...(strain.length ? ["", "[부담 확인]", ...strain] : []),
     ...(miss.length ? ["", "[미해결]", ...miss] : []),
@@ -639,18 +693,18 @@ function strainLine(n) {
 }
 
 function adviseBlock(plan, r) {
-  const notes = plan.steps.flatMap(s => s.strain || []);
-  if (!notes.some(n => n.hard)) return "";
+  const hardNotes = plan.steps.flatMap(s => s.strain || []).filter(n => n.hard);
+  if (!hardNotes.length) return "";
   const slot = r.affected[0];
-  const free = freeTeachersAt(slot.day, slot.period, r.sel).slice(0, 5);
-  const who = free.length
-    ? free.map(f => esc(f.name) + (f.subjects ? "(" + esc(f.subjects) + ")" : "")).join(" · ")
-    : "";
+  const strained = new Set(plan.steps.flatMap(s => s.strain || []).map(n => n.teacher));
+  const free = freeTeachersAt(slot.day, slot.period, r.sel, slot.classId)
+    .filter(f => !strained.has(f.name)).slice(0, 5);
+  const who = free.map(coverLabel).join(", ");
   return '<div class="advise">'
     + "<strong>무리한 교체입니다</strong>"
-    + "<p>이 안은 선생님 부담이 한도까지 찹니다. 교체를 밀어붙이기보다, "
-    + slot.day + " " + slot.period + "교시에 공강인 선생님께 보강을 부탁하는 편이 나을 수 있습니다."
-    + (who ? " 그 시간 공강: " + who + "." : " 다만 그 시간에 공강인 선생님이 없습니다.")
+    + "<p>" + esc(hardNotes.map(hardReason).join(". ")) + ". "
+    + "교체를 밀어붙이기보다, " + slot.day + " " + slot.period + "교시에 공강인 선생님께 보강을 부탁하는 편이 나을 수 있습니다."
+    + (who ? "<br><b>그 시간 공강</b> — " + who : " 다만 그 시간에 공강인 선생님이 없습니다.")
     + "</p></div>";
 }
 
@@ -665,12 +719,12 @@ function planCard(plan, i, r) {
       ${(s.strain || []).map(n => `<span class="strain ${n.hard ? "hard" : ""}">${n.hard ? "！" : "·"} ${strainLine(n)}</span>`).join("")}
     </div></li>`).join("");
   const missed = plan.missed.map(l => {
-    const free = freeTeachersAt(l.day, l.period, r.sel).slice(0, 4);
+    const free = freeTeachersAt(l.day, l.period, r.sel, l.classId).slice(0, 4);
     return `
     <li><span class="idx gap">—</span><div class="swap">
       <span class="slot">${l.day} ${l.period}교시</span> <b>${esc(cls(l.classId))} ${esc(l.subject)}</b>
       <span class="sub">${esc(missReason(l))}.
-      ${free.length ? "이 시간 공강: " + free.map(f => esc(f.name) + (f.subjects ? "(" + esc(f.subjects) + ")" : "")).join(" · ") + " — 보강을 부탁하세요."
+      ${free.length ? "이 시간 공강: " + free.map(coverLabel).join(", ") + " — 보강을 부탁하세요."
                      : "이 시간에 공강인 선생님도 없습니다."}</span>
     </div></li>`;
   }).join("");
