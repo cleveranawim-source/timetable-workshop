@@ -16,8 +16,13 @@ const mime = {
 const server = http.createServer((request, response) => {
   const requested = decodeURIComponent(new URL(request.url, `http://${request.headers.host}`).pathname);
   const relative = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
-  const target = path.resolve(root, relative);
-  if (!target.startsWith(root) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+  let target = path.resolve(root, relative);
+  // 폴더를 요청하면 그 안의 index.html을 내준다 (예: /exchange-site/)
+  if (target !== root && fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+    target = path.join(target, "index.html");
+  }
+  const inside = target === root || target.startsWith(root + path.sep);
+  if (!inside || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     response.end("파일을 찾을 수 없습니다.");
     return;

@@ -85,6 +85,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .nav-item.is-active::before { content: ""; position: absolute; left: -13px; width: 3px; height: 24px; border-radius: 0 3px 3px 0; background: #61a0ff; }
 .nav-icon { width: 23px; color: #8db4f2; font-size: 1.22rem; line-height: 1; text-align: center; }
 .nav-badge { margin-left: auto; min-width: 22px; height: 20px; padding: 0 6px; border-radius: 10px; display: grid; place-items: center; color: #ffdddd; background: rgba(217, 73, 73, .2); font-size: .72rem; }
+.nav-out {
+  display: flex; align-items: center; gap: 12px;
+  margin: 16px 15px 0; padding: 11px 13px; border-radius: 10px;
+  border: 1px solid rgba(97, 160, 255, .3); background: rgba(97, 160, 255, .12);
+  color: #dbe7fb; text-decoration: none; transition: background .15s, border-color .15s;
+}
+.nav-out:hover { background: rgba(97, 160, 255, .22); border-color: rgba(97, 160, 255, .55); }
+.nav-out strong { display: block; font-size: .86rem; color: #fff; font-weight: 600; }
+.nav-out small { display: block; font-size: .72rem; color: #9db4d6; margin-top: 1px; }
+
 .sidebar-foot { margin-top: auto; padding: 18px 15px 21px; border-top: 1px solid rgba(255,255,255,.07); }
 .save-state { display: flex; align-items: center; gap: 8px; margin: 0 6px 13px; color: #8496b3; font-size: .76rem; }
 .save-dot { width: 7px; height: 7px; border-radius: 50%; background: #35c495; box-shadow: 0 0 0 4px rgba(53,196,149,.1); }
