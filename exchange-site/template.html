@@ -145,6 +145,17 @@
   .swap .sub{display:block; color:var(--ink-soft); font-size:12.5px; margin-top:1px}
   .swap .slot{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums}
 
+  .strain{
+    display:block; margin-top:5px; font-size:11.5px; color:var(--ink-soft);
+    font-family:"IBM Plex Mono",monospace;
+  }
+  .strain.hard{color:var(--warn); font-weight:500}
+  .advise{
+    margin:14px 16px 0; padding:11px 13px; border:1px solid var(--warn-edge);
+    background:var(--warn-fill); border-radius:2px;
+  }
+  .advise strong{display:block; font-size:13px; color:var(--warn); margin-bottom:3px}
+  .advise p{margin:0; font-size:12.5px; line-height:1.6; color:var(--ink-soft)}
   .plan-foot{margin-top:auto; padding:14px 16px; display:flex; gap:8px}
   .ghost{
     font:inherit; font-size:12.5px; font-weight:500; color:var(--ink-soft);
@@ -382,6 +393,54 @@ function loadOk(teacher, temp, omit, sel) {
 }
 
 const stateAt = (teacher, day, period) => teacher.slotStates[day + "-" + period] || "available";
+/* 이 회전이 각 교사의 하루를 얼마나 무겁게 만드는지, 교체 전후를 비교한다.
+   한도를 넘는 안은 이미 걸러졌으므로 여기서 잡히는 것은 "합법이지만 부담되는" 경우다. */
+function strainOf(chain, temp, usedIds, add, omit, sel) {
+  const touched = new Set();
+  for (let i = 0; i < chain.length; i += 1) {
+    const to = chain[(i + 1) % chain.length];
+    touched.add(chain[i].teacherId + "|" + chain[i].day);   // 빠져나가는 날
+    touched.add(chain[i].teacherId + "|" + to.day);         // 새로 들어가는 날
+  }
+  const notes = [];
+  for (const key of touched) {
+    const at = key.lastIndexOf("|");
+    const tid = key.slice(0, at), day = key.slice(at + 1);
+    const t = T.get(tid);
+    if (!t) continue;
+    const before = periodsOn(tid, day, temp, usedIds, sel);
+    const after = periodsOn(tid, day, add, omit, sel);
+    const beforeRun = consecutiveMax(before), afterRun = consecutiveMax(after);
+    const runUp = afterRun >= 3 && afterRun > beforeRun;                    // 3연속 이상이 새로 생김
+    const loadUp = after.length > before.length && after.length >= t.maxDaily;  // 하루 한도까지 참
+    if (!runUp && !loadUp) continue;
+    notes.push({
+      teacher: t.name, day, runUp, loadUp,
+      run: afterRun, maxRun: t.maxConsecutive,
+      count: after.length, maxCount: t.maxDaily,
+      hard: (runUp && loadUp) || afterRun >= 4 || after.length >= 6,
+    });
+  }
+  return notes;
+}
+
+/* 그 교시에 수업이 없는 교사 — 보강을 부탁할 수 있는 사람들 */
+function freeTeachersAt(day, period, sel) {
+  const out = [];
+  for (const t of DATA.teachers) {
+    if (t.id === sel.teacherId || !byTeacher.has(t.id)) continue;
+    if (!t.allowedDays.includes(day)) continue;
+    if (stateAt(t, day, period) === "unavailable") continue;
+    if (byTeacherSlot.has(t.id + "|" + day + "-" + period)) continue;
+    const after = (byTeacherDay.get(t.id + "|" + day) || []).map(l => l.period).concat(period);
+    if (after.length > t.maxDaily || consecutiveMax(after) > t.maxConsecutive) continue;
+    out.push({ name: t.name, subjects: t.subjects.join("/"), load: after.length, max: t.maxDaily,
+               run: consecutiveMax(after), prefers: stateAt(t, day, period) === "prefer" });
+  }
+  out.sort((a, b) => (b.prefers - a.prefers) || (a.run - b.run) || (a.load - b.load) || a.name.localeCompare(b.name, "ko"));
+  return out;
+}
+
 const CYCLE_MAX = 3;   // 한 회전에 참여하는 수업 수 상한
 
 /* 결강 수업을 같은 반 안에서 다른 교시로 보낸다.
@@ -442,9 +501,12 @@ function optionsFor(lesson, temp, usedIds, limit, sel) {
       };
     });
 
+    const strain = strainOf(chain, temp, usedIds, add, omit, sel);
+    const hard = strain.filter(n => n.hard).length;
     found.push({
       lessonId: lesson.id, classId: lesson.classId, className: cls(lesson.classId),
-      length: chain.length, slots, avoided, score,
+      length: chain.length, slots, avoided, strain, hard,
+      score: score + strain.length * 8 + hard * 20,   // 부담되는 안은 뒤로
       usedIds: chain.slice(1).map(x => x.id),
       temp: add.slice(temp.length),
     });
@@ -553,8 +615,43 @@ function planText(plan, r) {
     ...s.slots.map(sl => "   " + sl.day + " " + sl.period + "교시: " +
       sl.beforeSubject + "(" + sl.beforeTeacher + ") → " + sl.afterSubject + "(" + sl.afterTeacher + ")"),
   ].join("\n"));
-  const miss = plan.missed.map(l => "· " + l.day + " " + l.period + "교시 " + cls(l.classId) + " " + l.subject + " — " + missReason(l));
-  return [head, "", ...rows, ...(miss.length ? ["", "[미해결]", ...miss] : [])].join("\n");
+  const strain = plan.steps.flatMap(s => (s.strain || []).map(n =>
+    "· " + n.teacher + " 선생님 " + n.day + "요일 " +
+    [n.runUp ? "연속 " + n.run + "시간" : "", n.loadUp ? "하루 " + n.count + "시간(한도 " + n.maxCount + ")" : ""].filter(Boolean).join(" · ")));
+  const miss = plan.missed.map(l => {
+    const free = freeTeachersAt(l.day, l.period, r.sel).slice(0, 4).map(f => f.name).join(", ");
+    return "· " + l.day + " " + l.period + "교시 " + cls(l.classId) + " " + l.subject + " — " + missReason(l) +
+      (free ? " (이 시간 공강: " + free + ")" : "");
+  });
+  const advise = plan.steps.some(s => s.hard)
+    ? ["", "[권고] 선생님 부담이 한도까지 찹니다. 공강 교사에게 보강을 부탁하는 편이 나을 수 있습니다."] : [];
+  return [head, "", ...rows,
+    ...(strain.length ? ["", "[부담 확인]", ...strain] : []),
+    ...(miss.length ? ["", "[미해결]", ...miss] : []),
+    ...advise].join("\n");
+}
+
+function strainLine(n) {
+  const parts = [];
+  if (n.runUp) parts.push("연속 " + n.run + "시간" + (n.run >= n.maxRun ? " (한도 " + n.maxRun + ")" : ""));
+  if (n.loadUp) parts.push("하루 " + n.count + "시간 (한도 " + n.maxCount + ")");
+  return esc(n.teacher) + " 선생님 " + n.day + "요일 " + parts.join(" · ");
+}
+
+function adviseBlock(plan, r) {
+  const notes = plan.steps.flatMap(s => s.strain || []);
+  if (!notes.some(n => n.hard)) return "";
+  const slot = r.affected[0];
+  const free = freeTeachersAt(slot.day, slot.period, r.sel).slice(0, 5);
+  const who = free.length
+    ? free.map(f => esc(f.name) + (f.subjects ? "(" + esc(f.subjects) + ")" : "")).join(" · ")
+    : "";
+  return '<div class="advise">'
+    + "<strong>무리한 교체입니다</strong>"
+    + "<p>이 안은 선생님 부담이 한도까지 찹니다. 교체를 밀어붙이기보다, "
+    + slot.day + " " + slot.period + "교시에 공강인 선생님께 보강을 부탁하는 편이 나을 수 있습니다."
+    + (who ? " 그 시간 공강: " + who + "." : " 다만 그 시간에 공강인 선생님이 없습니다.")
+    + "</p></div>";
 }
 
 function planCard(plan, i, r) {
@@ -565,19 +662,26 @@ function planCard(plan, i, r) {
       ${s.slots.map(sl => `<span class="sub"><span class="slot">${sl.day} ${sl.period}교시</span>
         ${esc(sl.beforeSubject)} · ${esc(sl.beforeTeacher)} →
         <b>${esc(sl.afterSubject)}</b> · <span class="to-t">${esc(sl.afterTeacher)}</span></span>`).join("")}
+      ${(s.strain || []).map(n => `<span class="strain ${n.hard ? "hard" : ""}">${n.hard ? "！" : "·"} ${strainLine(n)}</span>`).join("")}
     </div></li>`).join("");
-  const missed = plan.missed.map(l => `
+  const missed = plan.missed.map(l => {
+    const free = freeTeachersAt(l.day, l.period, r.sel).slice(0, 4);
+    return `
     <li><span class="idx gap">—</span><div class="swap">
       <span class="slot">${l.day} ${l.period}교시</span> <b>${esc(cls(l.classId))} ${esc(l.subject)}</b>
-      <span class="sub">${esc(missReason(l))}. 이 시간만 따로 조정하세요.</span>
-    </div></li>`).join("");
+      <span class="sub">${esc(missReason(l))}.
+      ${free.length ? "이 시간 공강: " + free.map(f => esc(f.name) + (f.subjects ? "(" + esc(f.subjects) + ")" : "")).join(" · ") + " — 보강을 부탁하세요."
+                     : "이 시간에 공강인 선생님도 없습니다."}</span>
+    </div></li>`;
+  }).join("");
   return `<article class="plan ${i === 0 ? "best" : ""}">
     <div class="plan-top">
       <div><h3>대안 ${i + 1}${i === 0 ? " · 추천" : ""}</h3><div class="load">부담 ${plan.score} · 교체 ${done}건 · 수업 ${plan.steps.reduce((n, s) => n + s.length, 0)}개 이동</div></div>
-      <span class="chip ${miss ? "part" : "full"}">${miss ? `${done}/${done + miss} 해결` : "전부 해결"}</span>
+      <span class="chip ${miss ? "part" : plan.steps.some(s => s.hard) ? "part" : "full"}">${miss ? `${done}/${done + miss} 해결` : plan.steps.some(s => s.hard) ? "전부 해결 · 부담 큼" : "전부 해결"}</span>
     </div>
     ${weekMap(plan, r)}
     <ol class="steps">${steps}${missed}</ol>
+    ${adviseBlock(plan, r)}
     <div class="plan-foot"><button class="ghost" type="button" data-copy="${i}">표 복사</button><button class="ghost" type="button" data-report="${i}">신고서</button></div>
   </article>`;
 }
