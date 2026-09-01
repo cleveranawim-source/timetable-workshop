@@ -803,13 +803,14 @@
     document.body.appendChild(overlay);
     window.setTimeout(() => {
       try {
-        const result = Core.generateSchedule(project, { reuseExisting: true, attempts: project.settings.attempts || 12 });
+        const result = Core.generateSchedule(project, { reuseExisting: true, attempts: project.settings.attempts || 12, timeLimitMs: project.settings.timeLimitMs });
         project = result.project;
         validation = result.validation;
         persist(true);
         render();
         const message = result.unscheduled.length ? `${result.unscheduled.length}개 수업 묶음을 배치하지 못했습니다.` : result.validation.errors.length ? `${result.validation.errors.length}개 필수 오류가 남았습니다.` : "모든 필수 조건을 충족했습니다.";
-        toast(result.unscheduled.length || result.validation.errors.length ? "재편성 완료 · 추가 조정 필요" : "재편성이 완료되었습니다", `${message} 변경 수업 ${result.changed}시간.`, result.unscheduled.length || result.validation.errors.length ? "error" : "success");
+        const notice = result.timedOut ? " 제한 시간에 걸려 탐색을 중단했으므로, 다시 실행하면 더 나은 결과가 나올 수 있습니다." : "";
+        toast(result.unscheduled.length || result.validation.errors.length ? "재편성 완료 · 추가 조정 필요" : "재편성이 완료되었습니다", `${message} 변경 수업 ${result.changed}시간.${notice}`, result.unscheduled.length || result.validation.errors.length ? "error" : "success");
       } catch (error) {
         console.error(error);
         toast("자동 편성 중 오류가 발생했습니다", error.message, "error");

@@ -16,6 +16,7 @@
   const DEFAULT_SETTINGS = {
     attempts: 12,
     reuseExisting: true,
+    timeLimitMs: 5000,
     weights: {
       compactDays: 14,
       gaps: 9,
@@ -380,10 +381,38 @@
       state.classSubjectDays.set(csd, (state.classSubjectDays.get(csd) || 0) + 1);
     }
 
+    function dropPeriod(map, key, period) {
+      const periods = map.get(key);
+      if (!periods) return;
+      const index = periods.indexOf(period);
+      if (index >= 0) periods.splice(index, 1);
+      if (!periods.length) map.delete(key);
+    }
+
+    function unindex(lesson) {
+      const key = slotKey(lesson.day, lesson.period);
+      const classKey = `${lesson.classId}|${key}`;
+      if (state.classSlots.get(classKey) === lesson) state.classSlots.delete(classKey);
+      if (lesson.teacherId) {
+        const teacherKey = `${lesson.teacherId}|${key}`;
+        if (state.teacherSlots.get(teacherKey) === lesson) state.teacherSlots.delete(teacherKey);
+        dropPeriod(state.teacherDays, `${lesson.teacherId}|${lesson.day}`, lesson.period);
+      }
+      if (lesson.room) {
+        const roomKey = `${lesson.room}|${key}`;
+        if (state.roomSlots.get(roomKey) === lesson) state.roomSlots.delete(roomKey);
+      }
+      dropPeriod(state.classDays, `${lesson.classId}|${lesson.day}`, lesson.period);
+      const csd = `${lesson.classId}|${lesson.subject}|${lesson.day}`;
+      const remaining = (state.classSubjectDays.get(csd) || 0) - 1;
+      if (remaining > 0) state.classSubjectDays.set(csd, remaining);
+      else state.classSubjectDays.delete(csd);
+    }
+
     function remove(item) {
       const index = state.schedule.findIndex((lesson) => lesson.id === item.id);
-      if (index >= 0) state.schedule.splice(index, 1);
-      rebuild();
+      if (index < 0) return;
+      unindex(state.schedule.splice(index, 1)[0]);
     }
 
     function rebuild() {
@@ -573,9 +602,10 @@
     return rejected;
   }
 
-  function repairRejectedBySwap(project, lookup, state, used, rejected, random) {
+  function repairRejectedBySwap(project, lookup, state, used, rejected, random, deadline) {
     const unresolved = [];
     let searchBudget = 40000;
+    const expired = () => Boolean(deadline) && Date.now() > deadline;
 
     function taskFor(item) {
       const requirement = lookup.requirements.get(item.requirementId);
@@ -603,7 +633,7 @@
 
     function placeWithChain(item, depth, stack) {
       searchBudget -= 1;
-      if (searchBudget < 0 || depth < 0) return false;
+      if (searchBudget < 0 || depth < 0 || expired()) return false;
       const task = taskFor(item);
       if (!task || item.blockId) return false;
       const candidates = allSlots(project).map((slot) => {
@@ -616,9 +646,10 @@
         };
       }).sort((a, b) => a.rank - b.rank);
 
+      const snapshot = state.schedule.map((lesson) => Object.assign({}, lesson));
       for (const candidate of candidates) {
+        if (expired()) return false;
         if (candidate.blockers.some((blocker) => blocker.locked || blocker.type === "special" || blocker.blockId || stack.has(blocker.id))) continue;
-        const snapshot = state.schedule.map((lesson) => Object.assign({}, lesson));
         for (const blocker of candidate.blockers) state.remove(blocker);
         if (canPlace(project, lookup, state, task, candidate.day, candidate.period)) {
           state.add(Object.assign({}, item, { day: candidate.day, period: candidate.period }));
@@ -639,6 +670,10 @@
     }
 
     for (const original of rejected) {
+      if (expired()) {
+        unresolved.push(original);
+        continue;
+      }
       const requirement = lookup.requirements.get(original.requirementId);
       if (!requirement || original.blockId) {
         unresolved.push(original);
@@ -710,7 +745,10 @@
       attempts: project.settings.attempts,
       reuseExisting: project.settings.reuseExisting,
       seed: Date.now(),
+      timeLimitMs: project.settings.timeLimitMs,
     }, rawOptions || {});
+    const timeLimitMs = Number(options.timeLimitMs);
+    const deadline = timeLimitMs > 0 ? Date.now() + timeLimitMs : 0;
     const fixed = project.schedule.filter((item) => item.locked || item.type === "special");
     let best = null;
 
@@ -723,7 +761,7 @@
       }
       const originalPositions = new Map(project.schedule.map((item) => [item.id, `${item.day}|${item.period}`]));
       const rejected = seedExisting(project, lookup, state, used, options);
-      if (options.reuseExisting && rejected.length) repairRejectedBySwap(project, lookup, state, used, rejected, random);
+      if (options.reuseExisting && rejected.length) repairRejectedBySwap(project, lookup, state, used, rejected, random, deadline);
       const tasks = makeTasks(project, used);
 
       const difficulty = (task) => {
@@ -747,7 +785,9 @@
         best = { project: candidate, validation, unscheduled, changed, score, attempt: attempt + 1 };
       }
       if (best.unscheduled.length === 0 && best.validation.errors.length === 0) break;
+      if (deadline && Date.now() > deadline) break;
     }
+    if (best) best.timedOut = Boolean(deadline) && Date.now() > deadline;
     return best;
   }
 
