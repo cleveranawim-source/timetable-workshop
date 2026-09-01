@@ -28,20 +28,21 @@
   const spaced = name => String(name || "").split("").join(" ");
   const schoolYear = d => (d.getMonth() + 1 >= 3 ? d.getFullYear() : d.getFullYear() - 1);
 
-  /* 교체 1건 → 신고서 2행. 같은 학급끼리 맞바꾸면 과목이 서로 자리를 바꾼다. */
+  /* 교체 1건 → 신고서 2행.
+     같은 반의 두 수업이 교시를 맞바꾸므로 각 교시의 과목도 서로 자리를 바꾼다. */
   function rowsFor(steps, absentName, baseDate, cls) {
     const rows = [];
     for (const s of steps) {
-      const sameClass = s.classId === s.backClassId;
       const d1 = dateForDay(baseDate, s.fromDay);
       const d2 = dateForDay(baseDate, s.backDay);
+      const name = cls(s.classId);
       rows.push({
-        left:  [s.subject, monthDay(d1), s.fromDay, String(s.fromPeriod), cls(s.classId), absentName],
-        right: [sameClass ? s.backSubject : s.subject, monthDay(d1), s.fromDay, String(s.fromPeriod), cls(s.classId), s.coverName],
+        left:  [s.subject, monthDay(d1), s.fromDay, String(s.fromPeriod), name, absentName],
+        right: [s.backSubject, monthDay(d1), s.fromDay, String(s.fromPeriod), name, s.coverName],
       });
       rows.push({
-        left:  [s.backSubject, monthDay(d2), s.backDay, String(s.backPeriod), cls(s.backClassId), s.coverName],
-        right: [sameClass ? s.subject : s.backSubject, monthDay(d2), s.backDay, String(s.backPeriod), cls(s.backClassId), absentName],
+        left:  [s.backSubject, monthDay(d2), s.backDay, String(s.backPeriod), name, s.coverName],
+        right: [s.subject, monthDay(d2), s.backDay, String(s.backPeriod), name, absentName],
       });
     }
     return rows;

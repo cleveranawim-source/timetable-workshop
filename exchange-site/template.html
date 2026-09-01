@@ -81,6 +81,8 @@
   }
   .go:hover{opacity:.85}
   .go[disabled]{opacity:.5; cursor:progress}
+  .form-help{margin:13px 0 0; font-size:12.5px; color:var(--ink-soft); line-height:1.6}
+  .form-help b{color:var(--ink); font-weight:600}
 
   /* ── 요약 ─────────────────────────────── */
   .tally{display:grid; grid-template-columns:repeat(auto-fit,minmax(122px,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); margin-top:26px}
@@ -253,7 +255,7 @@
   <header class="masthead">
     <span class="eyebrow">Reciprocal swap finder</span>
     <h1>수업 교체 도우미</h1>
-    <p>출장·연가·연수·병가로 비는 수업을, 두 교사가 서로의 수업을 맞바꾸는 방식으로 메웁니다.</p>
+    <p>출장·연가·연수·병가로 비는 수업을, 같은 반의 다른 수업과 교시를 맞바꿔 메웁니다. 보강 없이 언제나 1대1 교환입니다.</p>
     <p class="src" id="src"></p>
   </header>
 
@@ -276,6 +278,7 @@
       <label class="field"><span>교시 범위</span><select id="period"></select></label>
       <button class="go" id="go" type="button">경우의 수 찾기</button>
     </div>
+    <p class="form-help">결강 수업과 <b>같은 반의 다른 수업</b>이 교시를 통째로 맞바꿉니다. 두 선생님 모두 자기 과목을 그대로 가르치므로 보강이 생기지 않습니다.</p>
   </section>
 
   <div id="out"></div>
@@ -304,9 +307,10 @@
   </dialog>
 
   <p class="note">
-    <b>검사 항목</b> — 양쪽 교사의 같은 시간 수업 중복, 수업 불가 교시, 근무 가능 요일, 일일 최대 수업, 최대 연속수업을 가상 시간표에서 다시 검사합니다.
-    같은 학급 안에서 교시만 옮기는 학급교환과, 한쪽이 일방적으로 떠맡는 대강은 후보에 넣지 않습니다.<br>
-    <b>부담 점수</b> — 낮을수록 좋습니다. 담당 과목이 맞는 교사가 맡을수록, 두 수업의 요일이 가까울수록 낮아집니다.<br>
+    <b>교환 규칙</b> — 결강 수업과 <b>같은 반의 다른 수업</b>이 교시를 통째로 맞바꿉니다. 두 수업 모두 담당 교사가 그대로 자기 과목을 가르치므로 보강이 생기지 않고, 학급이 주당 받는 과목 수도 변하지 않습니다.
+    창체·고정수업과 2시간 연강은 쪼갤 수 없어 상대 후보에서 뺍니다.<br>
+    <b>검사 항목</b> — 양쪽 교사의 같은 시간 수업 중복, 수업 불가 교시, 근무 가능 요일, 일일 최대 수업, 최대 연속수업을 가상 시간표에서 다시 검사합니다.<br>
+    <b>부담 점수</b> — 낮을수록 좋습니다. 두 수업의 요일이 가까울수록, 두 교사의 기피 교시를 건드리지 않을수록 낮아집니다.<br>
     <b>주의</b> — 결과는 임시 계획입니다. 정규 시간표는 바뀌지 않으며, 실제 적용 전 양쪽 선생님의 동의를 받으세요.
   </p>
 </div>
@@ -335,23 +339,18 @@ for (const l of DATA.schedule) {
 }
 const ACTIVE = DATA.teachers.filter(t => byTeacher.has(t.id));
 const byClassSlot = new Map();   // "cid|요일-교시" → 수업
-for (const l of DATA.schedule) byClassSlot.set(l.classId + "|" + l.day + "-" + l.period, l);
+const byClass = new Map();       // cid → 수업[]
+for (const l of DATA.schedule) {
+  byClassSlot.set(l.classId + "|" + l.day + "-" + l.period, l);
+  if (!byClass.has(l.classId)) byClass.set(l.classId, []);
+  byClass.get(l.classId).push(l);
+}
 
 const consecutiveMax = periods => {
   const s = [...new Set(periods)].sort((a, b) => a - b);
   let max = 0, run = 0, prev = -100;
   for (const p of s) { run = p === prev + 1 ? run + 1 : 1; prev = p; if (run > max) max = run; }
   return max;
-};
-const family = subject => {
-  const v = String(subject || "").trim();
-  if (/^영[AB]$|영어/.test(v)) return "영어";
-  if (/^체[AB]$|체육|운동/.test(v)) return "체육";
-  if (/^사역$|사회|역사/.test(v)) return "사회";
-  if (/^과[AB]$|과학/.test(v)) return "과학";
-  if (/^미[AB]$|미술/.test(v)) return "미술";
-  if (/^음[AB]$|음악/.test(v)) return "음악";
-  return v.replace(/[ⅠⅡⅢIV\s]/g, "");
 };
 const esc = v => String(v ?? "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
 const inWindow = (day, period, sel) => {
@@ -381,47 +380,57 @@ function loadOk(teacher, temp, omit, sel) {
   return true;
 }
 
-/* 결강 수업 하나를 두고, 서로 수업을 맞바꿀 수 있는 상대를 찾는다 */
+const stateAt = (teacher, day, period) => teacher.slotStates[day + "-" + period] || "available";
+
+/* 결강 수업 하나를 두고, 같은 학급 안에서 교시를 맞바꿀 상대 수업을 찾는다.
+   반드시 1대1 교환이다. 한쪽이 일방적으로 떠맡는 보강은 만들지 않는다.
+   두 수업이 자리를 바꾸므로 학급이 받는 과목 수는 그대로다. */
 function optionsFor(lesson, temp, usedIds, limit, sel) {
   const absent = T.get(sel.teacherId);
-  const fam = family(lesson.subject);
   const out = [];
-  for (const cover of DATA.teachers) {
-    if (cover.id === absent.id || !cover.allowedDays.includes(lesson.day)) continue;
-    if ((cover.slotStates[lesson.day + "-" + lesson.period] || "available") === "unavailable") continue;
+  for (const back of byClass.get(lesson.classId) || []) {
+    if (back.id === lesson.id || usedIds.has(back.id)) continue;
+    if (back.type === "special" || back.locked || back.blockId) continue;   // 창체·고정·연강은 쪼갤 수 없다
+    if (!back.teacherId || back.teacherId === absent.id) continue;
+    if (inWindow(back.day, back.period, sel)) continue;                     // 결강 시간대로는 옮길 수 없다
+    const cover = T.get(back.teacherId);
+    if (!cover) continue;
+
+    // 상대 교사가 결강 교시로 올 수 있는가
+    if (!cover.allowedDays.includes(lesson.day)) continue;
+    if (stateAt(cover, lesson.day, lesson.period) === "unavailable") continue;
     if (byTeacherSlot.has(cover.id + "|" + lesson.day + "-" + lesson.period)) continue;
     if (temp.some(t => t.teacherId === cover.id && t.day === lesson.day && t.period === lesson.period)) continue;
 
-    for (const back of byTeacher.get(cover.id) || []) {
-      if (back.type === "special" || usedIds.has(back.id)) continue;
-      if (inWindow(back.day, back.period, sel)) continue;
-      if (!absent.allowedDays.includes(back.day)) continue;
-      if ((absent.slotStates[back.day + "-" + back.period] || "available") === "unavailable") continue;
-      if (byTeacherSlot.has(absent.id + "|" + back.day + "-" + back.period)) continue;
-      if (temp.some(t => t.teacherId === absent.id && t.day === back.day && t.period === back.period)) continue;
+    // 결강 교사가 상대 교시로 갈 수 있는가
+    if (!absent.allowedDays.includes(back.day)) continue;
+    if (stateAt(absent, back.day, back.period) === "unavailable") continue;
+    if (byTeacherSlot.has(absent.id + "|" + back.day + "-" + back.period)) continue;
+    if (temp.some(t => t.teacherId === absent.id && t.day === back.day && t.period === back.period)) continue;
 
-      const add = temp.concat(
-        { teacherId: cover.id, day: lesson.day, period: lesson.period },
-        { teacherId: absent.id, day: back.day, period: back.period }
-      );
-      const omit = new Set(usedIds); omit.add(back.id);
-      if (!loadOk(cover, add, omit, sel)) continue;
-      if (!loadOk(absent, add, omit, sel)) continue;
+    const add = temp.concat(
+      { teacherId: cover.id, day: lesson.day, period: lesson.period },
+      { teacherId: absent.id, day: back.day, period: back.period }
+    );
+    const omit = new Set(usedIds); omit.add(back.id);
+    if (!loadOk(cover, add, omit, sel)) continue;
+    if (!loadOk(absent, add, omit, sel)) continue;
 
-      const coverFits = cover.subjects.some(s => family(s) === fam);
-      const backFits = absent.subjects.some(s => family(s) === family(back.subject));
-      out.push({
-        lessonId: lesson.id, classId: lesson.classId, subject: lesson.subject,
-        fromDay: lesson.day, fromPeriod: lesson.period,
-        coverId: cover.id, coverName: cover.name,
-        backId: back.id, backClassId: back.classId, backSubject: back.subject,
-        backDay: back.day, backPeriod: back.period,
-        coverFits, backFits,
-        score: (coverFits ? 4 : 18) + (backFits ? 4 : 18) + Math.abs(DAY_IX.get(lesson.day) - DAY_IX.get(back.day)) * 2,
-      });
-    }
+    const goes = stateAt(absent, back.day, back.period);   // 결강 교사가 가게 될 자리
+    const comes = stateAt(cover, lesson.day, lesson.period); // 상대 교사가 오게 될 자리
+    const weigh = state => state === "avoid" ? 12 : state === "prefer" ? -6 : 0;
+    out.push({
+      lessonId: lesson.id, classId: lesson.classId, subject: lesson.subject,
+      fromDay: lesson.day, fromPeriod: lesson.period,
+      coverId: cover.id, coverName: cover.name,
+      backId: back.id, backClassId: back.classId, backSubject: back.subject,
+      backDay: back.day, backPeriod: back.period,
+      avoided: goes === "avoid" || comes === "avoid",
+      score: Math.abs(DAY_IX.get(lesson.day) - DAY_IX.get(back.day)) * 3
+        + weigh(goes) + weigh(comes) + (back.day === lesson.day ? -2 : 0),
+    });
   }
-  out.sort((a, b) => a.score - b.score || a.coverName.localeCompare(b.coverName, "ko"));
+  out.sort((a, b) => a.score - b.score || a.backPeriod - b.backPeriod || a.coverName.localeCompare(b.coverName, "ko"));
   return out.slice(0, limit);
 }
 
@@ -499,10 +508,11 @@ function weekMap(plan, r) {
 function planText(plan, r) {
   const head = r.absent.name + " 선생님 " + r.sel.day + "요일 " + periodLabel(r.sel.period) + " " + r.sel.reason + " · 수업 교체안";
   const rows = plan.steps.map((s, i) =>
-    (i + 1) + ". " + s.fromDay + " " + s.fromPeriod + "교시 " + cls(s.classId) + " " + s.subject +
-    " → " + s.coverName + " 선생님\n" +
-    "   대신 " + s.backDay + " " + s.backPeriod + "교시 " + cls(s.backClassId) + " " + s.backSubject +
-    " → " + r.absent.name + " 선생님");
+    (i + 1) + ". " + cls(s.classId) + " — " +
+    s.fromDay + " " + s.fromPeriod + "교시 " + s.subject + " ↔ " +
+    s.backDay + " " + s.backPeriod + "교시 " + s.backSubject + "\n" +
+    "   " + s.fromDay + " " + s.fromPeriod + "교시는 " + s.coverName + " 선생님이 " + s.backSubject + " 수업,\n" +
+    "   " + s.backDay + " " + s.backPeriod + "교시는 " + r.absent.name + " 선생님이 " + s.subject + " 수업");
   const miss = plan.missed.map(l => "· " + l.day + " " + l.period + "교시 " + cls(l.classId) + " " + l.subject + " — 교체 상대를 찾지 못함");
   return [head, "", ...rows, ...(miss.length ? ["", "[미해결]", ...miss] : [])].join("\n");
 }
@@ -511,14 +521,15 @@ function planCard(plan, i, r) {
   const done = plan.steps.length, miss = plan.missed.length;
   const steps = plan.steps.map((s, n) => `
     <li><span class="idx">${n + 1}</span><div class="swap">
-      <span class="slot">${s.fromDay} ${s.fromPeriod}교시</span> <b>${esc(cls(s.classId))} ${esc(s.subject)}</b> →
-      <span class="to-t">${esc(s.coverName)}</span> 선생님
-      <span class="sub">대신 <span class="slot">${s.backDay} ${s.backPeriod}교시</span> ${esc(cls(s.backClassId))} ${esc(s.backSubject)} → <span class="from-t">${esc(r.absent.name)}</span> 선생님</span>
+      <b>${esc(cls(s.classId))}</b> <span class="slot">${s.fromDay} ${s.fromPeriod}교시</span> ${esc(s.subject)}
+      ↔ <span class="slot">${s.backDay} ${s.backPeriod}교시</span> ${esc(s.backSubject)}
+      <span class="sub"><span class="slot">${s.fromDay} ${s.fromPeriod}</span>은 <span class="to-t">${esc(s.coverName)}</span> 선생님이 ${esc(s.backSubject)},
+      <span class="slot">${s.backDay} ${s.backPeriod}</span>은 <span class="from-t">${esc(r.absent.name)}</span> 선생님이 ${esc(s.subject)}</span>
     </div></li>`).join("");
   const missed = plan.missed.map(l => `
     <li><span class="idx gap">—</span><div class="swap">
       <span class="slot">${l.day} ${l.period}교시</span> <b>${esc(cls(l.classId))} ${esc(l.subject)}</b>
-      <span class="sub">맞바꿀 상대를 찾지 못했습니다. 이 시간만 따로 조정하세요.</span>
+      <span class="sub">같은 반 안에서 맞바꿀 수업을 찾지 못했습니다. 이 시간만 따로 조정하세요.</span>
     </div></li>`).join("");
   return `<article class="plan ${i === 0 ? "best" : ""}">
     <div class="plan-top">
@@ -541,8 +552,8 @@ function render(r) {
   const cand = r.perLesson.reduce((n, x) => n + x.options.length, 0);
   const lessons = r.perLesson.map(x => {
     const list = x.options.length
-      ? x.options.map(o => `<li><b>${esc(o.coverName)}</b><span>${o.backDay} ${o.backPeriod}교시 ${esc(cls(o.backClassId))} ${esc(o.backSubject)} 수업과 맞바꿈${o.coverFits ? " · 같은 교과" : ""}</span></li>`).join("")
-      : `<li><span>전체 교사 시간표에 맞바꿀 수 있는 수업이 없습니다.</span></li>`;
+      ? x.options.map(o => `<li><b>${o.backDay} ${o.backPeriod}교시</b><span>${esc(o.backSubject)} · ${esc(o.coverName)} 선생님과 교시 맞바꿈${o.avoided ? " · 기피 교시 포함" : ""}</span></li>`).join("")
+      : `<li><span>같은 반 안에 맞바꿀 수 있는 수업이 없습니다.</span></li>`;
     return `<details class="lesson"${x.options.length ? "" : " open"}>
       <summary><span class="per">${x.lesson.period}교시</span>
         <b>${esc(cls(x.lesson.classId))} · ${esc(x.lesson.subject)}</b>
@@ -561,12 +572,12 @@ function render(r) {
       <div><span>탐색 노드</span><strong>${r.nodes}</strong></div>
     </div>
     <div class="heading"><h2>교체 조합</h2><p>부담이 낮은 순서입니다.</p></div>
-    <p class="legend"><span><i class="f"></i>결강 수업</span><span><i class="t"></i>대신 맡을 수업</span>
+    <p class="legend"><span><i class="f"></i>결강 수업</span><span><i class="t"></i>맞바꿀 수업</span>
       <span><i class="b"></i>원래 수업</span><span><i class="m"></i>미해결</span></p>
     ${r.plans.length
       ? `<div class="plans">${r.plans.map((p, i) => planCard(p, i, r)).join("")}</div>`
-      : `<div class="empty"><strong>맞바꿀 수 있는 조합이 없습니다</strong>교사 근무 요일이나 불가 교시가 빡빡한 경우입니다. 아래 수업별 후보를 참고해 개별로 조정하세요.</div>`}
-    <div class="heading"><h2>수업별 교체 후보</h2><p>각 수업을 단독으로 볼 때 가능한 상대입니다.</p></div>
+      : `<div class="empty"><strong>맞바꿀 수 있는 조합이 없습니다</strong>같은 반 안에서 두 교사의 근무 요일·불가 교시·연속수업 한도를 모두 만족하는 짝이 없습니다. 아래 수업별 후보를 참고해 개별로 조정하세요.</div>`}
+    <div class="heading"><h2>수업별 교체 후보</h2><p>같은 반 안에서 그 수업 하나만 놓고 볼 때 맞바꿀 수 있는 교시입니다.</p></div>
     ${lessons}`;
 
   out.querySelectorAll("[data-copy]").forEach(btn => {
@@ -629,7 +640,7 @@ $("go").addEventListener("click", () => {
 });
 
 $("out").innerHTML = `<div class="empty"><strong>조건을 정하고 ‘경우의 수 찾기’를 누르세요</strong>
-  선생님과 요일, 교시 범위를 고르면 전체 교사 시간표에서 맞바꿀 수 있는 조합을 찾습니다.</div>`;
+  선생님과 요일, 교시 범위를 고르면 같은 반 안에서 교시를 맞바꿀 수 있는 조합을 찾습니다.</div>`;
 
 /* ── 교체 수업 신고서 ────────────────────── */
 /* 첨부 양식과 같은 배치: 결재란, 사유·신고 교사, 13열 표.
@@ -645,16 +656,16 @@ if (IN_ARTIFACT) {
 function reportRows(plan, r, base) {
   const rows = [];
   for (const s of plan.steps) {
-    const same = s.classId === s.backClassId;
     const d1 = nextDateFor(s.fromDay, base), d2 = nextDateFor(s.backDay, base);
     const md = d => (d.getMonth() + 1) + "." + d.getDate();
+    const name = cls(s.classId);
     rows.push({
-      left: [s.subject, md(d1), s.fromDay, s.fromPeriod, cls(s.classId), r.absent.name],
-      right: [same ? s.backSubject : s.subject, md(d1), s.fromDay, s.fromPeriod, cls(s.classId), s.coverName],
+      left: [s.subject, md(d1), s.fromDay, s.fromPeriod, name, r.absent.name],
+      right: [s.backSubject, md(d1), s.fromDay, s.fromPeriod, name, s.coverName],
     });
     rows.push({
-      left: [s.backSubject, md(d2), s.backDay, s.backPeriod, cls(s.backClassId), s.coverName],
-      right: [same ? s.subject : s.backSubject, md(d2), s.backDay, s.backPeriod, cls(s.backClassId), r.absent.name],
+      left: [s.backSubject, md(d2), s.backDay, s.backPeriod, name, s.coverName],
+      right: [s.subject, md(d2), s.backDay, s.backPeriod, name, r.absent.name],
     });
   }
   return rows;
